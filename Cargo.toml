@@ -1,0 +1,24 @@
+[package]
+name = "rdir"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
+[dependencies]
+anyhow = "1.0.101"
+async-broadcast = "0.7.2"
+async-executor = "1.13.3"
+backoff = "0.4.0"
+bitcode = "0.6.9"
+clap = { version = "4.5.57", features = ["derive"] }
+derive_more = { version = "2.1.1", features = ["full"] }
+env_logger = "0.11.8"
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
+log = { version = "0.4.29", features = ["release_max_level_info"] }
+lz4 = "1.28.1"
+nix = { version = "0.31.1", features = ["fs", "process"] }
+smol = "2.0.2"
