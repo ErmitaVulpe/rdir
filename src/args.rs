@@ -24,6 +24,15 @@ pub struct Args {
     pub tmp_dir: PathBuf,
 }
 
+impl Args {
+    pub fn expects_active_server(&self) -> bool {
+        match self.command {
+            Command::Connect { .. } | Command::Discover | Command::Share { .. } => true,
+            Command::Kill | Command::Ls => false,
+        }
+    }
+}
+
 #[derive(Debug, IsVariant, Subcommand)]
 pub enum Command {
     /// manage Connections
@@ -35,13 +44,9 @@ pub enum Command {
     /// Discover shares in the local network
     #[command(short_flag = 'D', alias = "d")]
     Discover,
-    /// Kill the server
+    /// Kill the server, lets ongoing operations finish
     #[command(short_flag = 'K', alias = "k")]
-    Kill {
-        /// Force kill, might lead to data corruption
-        #[arg(short = 'f')]
-        force: bool,
-    },
+    Kill,
     /// List shares and the status of the server
     #[command(short_flag = 'L', alias = "l")]
     Ls,
@@ -61,19 +66,19 @@ pub enum ConnectCommand {
     /// Mount a new connection
     #[command(short_flag = 'm', alias = "m")]
     Mount {
-        /// Path to dir a share
+        /// Name of the remote share. If address is omitted, tries to search the local network
+        #[arg()]
+        name: ShareName,
+        /// Path to a dir to mount the share
         #[arg(value_hint=ValueHint::DirPath)]
         path: PathBuf,
-        /// Name of the share, defaults to the name of the shared dir
-        #[arg()]
-        name: Option<String>,
     },
     /// Unmount a connection
     #[command(short_flag = 'u', alias = "u")]
     Unmount {
-        /// Name of the connection
+        /// Name of the connection, if ambiguous specify as <IP>:<NAME>
         #[arg()]
-        name: String,
+        name: ShareName,
     },
 }
 
@@ -85,9 +90,9 @@ pub enum ShareCommand {
     /// Remove a share
     #[command(short_flag = 'r', alias = "r")]
     Remove {
-        /// Name of the share, if ambiguous specify as <IP>:<NAME>
+        /// Name of the share
         #[arg()]
-        name: ShareName,
+        name: CommonShareName,
     },
     /// create a new Share
     #[command(short_flag = 's', alias = "s")]
@@ -97,7 +102,7 @@ pub enum ShareCommand {
         path: PathBuf,
         /// Name of the share, defaults to the name of the shared dir
         #[arg()]
-        name: CommonShareName,
+        name: Option<CommonShareName>,
     },
 }
 

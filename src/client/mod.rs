@@ -1,93 +1,71 @@
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 
-use anyhow::{Context, Result as AnyResult, anyhow};
+use anyhow::{Context, Result as AnyResult};
 use backoff::{ExponentialBackoffBuilder, backoff::Backoff};
 use bitcode::{decode, encode};
-use smol::{
-    LocalExecutor, Task, Timer, future,
-    io::{self, AsyncReadExt, AsyncWriteExt},
-    net::unix::UnixStream,
-};
+use smol::{LocalExecutor, Timer, io, net::unix::UnixStream};
 
 use crate::{
-    args::{self, Args},
-    common::{ClientMessage, ServerMessage},
+    args::Args,
+    common::{ClientMessage, ServerMessage, framing::FramedStream},
+    server::SOCKET_NAME,
 };
 
-thread_local! {
-    static EX: LocalExecutor<'static> = const { LocalExecutor::new() };
+pub struct Client<'a> {
+    ex: LocalExecutor<'a>,
 }
 
-fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> Task<T> {
-    EX.with(|ex| ex.spawn(future))
-}
+impl Client<'_> {
+    pub fn run(args: Args, maybe_sock: Option<std::os::unix::net::UnixStream>) -> AnyResult<()> {
+        let maybe_sock = maybe_sock
+            .map(UnixStream::try_from)
+            .transpose()
+            .context("Failed to register the IPC socket as async")?;
 
-pub fn main(args: Args) -> AnyResult<()> {
-    EX.with(|ex| {
-        let result = future::block_on(ex.run(async_main(args)));
+        let ex = LocalExecutor::new();
+        let self_ = Self { ex };
 
-        // make sure all jobs finished
-        while ex.try_tick() {}
-        result
-    })
-}
-
-async fn async_main(args: Args) -> AnyResult<()> {
-    let mut stream = connect(&args).await.ok_or(anyhow!("No server running"))?;
-    match args.command {
-        None => loop {
-            let buf = encode(&ClientMessage::Subscribe);
-            stream
-                .write(&buf)
-                .await
-                .context("Failed to send a subscribe message")?;
-            let mut buf = vec![0u8; 1024];
-            let n = stream.read(&mut buf).await?;
-
-            let msg: ServerMessage = decode(&buf[..n]).context("Server sent an invalid message")?;
-            println!("{:?}", msg);
-        },
-        Some(args::Command::Kill) => {
-            let buf = encode(&ClientMessage::Kill);
-            stream
-                .write(&buf)
-                .await
-                .context("Failed to send a kill message")?;
-            stream.flush().await?;
-        }
-        Some(args::Command::Message { message }) => {
-            let buf = encode(&ClientMessage::Publish { message });
-            stream
-                .write_all(&buf)
-                .await
-                .context("Failed to send a message")?;
-        }
+        smol::block_on(self_.ex.run(self_.main(args, maybe_sock)))
     }
 
-    Ok(())
+    async fn main(&self, args: Args, maybe_sock: Option<UnixStream>) -> AnyResult<()> {
+        let sock = match (maybe_sock, args.expects_active_server()) {
+            (Some(val), _) => val,
+            (None, false) => {
+                println!("Server is down");
+                return Ok(());
+            }
+            (None, true) => try_connect(&args).await.context(
+                "Failed to connect to the newly spawned server. If this persists, there might be something wrong with the `tmpdir`. If it works on the second try, create a gh issue labeled \"I NEED MORE TIME\""
+            )?,
+        };
+        let mut stream = FramedStream::new(sock);
+        stream.write(&encode(&ClientMessage::from(&args))).await?;
+        let resp: ServerMessage = decode(&stream.read().await?)?;
+        println!("resp: {resp:?}");
+
+        Ok(())
+    }
 }
 
-async fn connect(args: &Args) -> Option<UnixStream> {
-    // means the server was not just spawned, no need to retry
-    if args.command.is_some() {
-        return UnixStream::connect(&args.socket).await.ok();
-    }
-
+/// Tries to connect to the newly spawned server
+async fn try_connect(args: &Args) -> io::Result<UnixStream> {
     let mut backoff = ExponentialBackoffBuilder::new()
         .with_initial_interval(Duration::from_millis(50))
         .with_randomization_factor(0.25)
         .with_max_interval(Duration::from_millis(250))
         .with_max_elapsed_time(Some(Duration::from_millis(1500)))
         .build();
+    let sock = args.tmp_dir.join(SOCKET_NAME);
 
     loop {
-        match UnixStream::connect(&args.socket).await {
-            Ok(val) => return Some(val),
-            Err(_) => match backoff.next_backoff() {
+        match UnixStream::connect(&sock).await {
+            Ok(val) => return Ok(val),
+            Err(e) => match backoff.next_backoff() {
                 Some(delay) => {
                     Timer::after(delay).await;
                 }
-                None => return None,
+                None => return Err(e),
             },
         }
     }

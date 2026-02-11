@@ -1,47 +1,63 @@
-use std::{fs, os::unix::net::UnixStream, path::Path};
+use std::{
+    fs,
+    os::unix::net::{UnixListener, UnixStream},
+    path::Path,
+};
 
 use anyhow::{Context, Result as AnyResult};
 use clap::Parser;
 use nix::unistd::{ForkResult, fork};
 
+use crate::server::SOCKET_NAME;
+
 mod args;
+mod client;
 mod common;
-// mod client;
-// mod server;
+mod server;
 
 fn main() -> AnyResult<()> {
     let args = args::Args::parse();
-    println!("{args:#?}");
-    Ok(())
 
-    // let mut is_client = true;
-    // let is_server_active = is_server_active(&args.socket);
-    // if args.command.is_none() && !is_server_active {
-    //     match unsafe { fork() } {
-    //         Ok(ForkResult::Parent { .. }) => {}
-    //         Ok(ForkResult::Child) => {
-    //             is_client = false;
-    //         }
-    //         Err(e) => return Err(e).context("Failed to spawn the server"),
-    //     }
-    // }
-    //
-    // match is_client {
-    //     true => client::main(args),
-    //     false => server::main(args),
-    // }
+    let sock_path = args.tmp_dir.join(SOCKET_NAME);
+    let mut is_client = true;
+    let maybe_sock = try_connect(&sock_path);
+    let mut maybe_listener = None;
+    if args.expects_active_server() && maybe_sock.is_none() {
+        let _ = fs::create_dir(&args.tmp_dir);
+        let listener = UnixListener::bind(&sock_path).context(format!(
+            "Failed to create a unix socket at: {}",
+            sock_path.to_string_lossy()
+        ))?;
+
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { .. }) => {
+                drop(listener);
+            }
+            Ok(ForkResult::Child) => {
+                is_client = false;
+                maybe_listener = Some(listener);
+            }
+            Err(e) => return Err(e).context("Failed to spawn the server"),
+        }
+    }
+
+    match is_client {
+        true => client::Client::run(args, maybe_sock),
+        false => server::Server::run(args, maybe_listener.unwrap()),
+        // false => server::main(args),
+    }
 }
 
-/// Checks if the server is alive, if not, it cleans up an unused socket
-fn is_server_active(sock: impl AsRef<Path>) -> bool {
-    let path = sock.as_ref();
+fn try_connect(sock_path: impl AsRef<Path>) -> Option<UnixStream> {
+    let path = sock_path.as_ref();
+
     if path.exists() {
-        let b = UnixStream::connect(path).is_ok();
-        if !b {
+        let stream = UnixStream::connect(path);
+        if stream.is_err() {
             let _ = fs::remove_file(path);
         }
-        b
+        stream.ok()
     } else {
-        false
+        None
     }
 }
