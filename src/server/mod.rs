@@ -24,6 +24,9 @@ use crate::{
     common::{ClientMessage, ServerMessage},
 };
 
+pub const DOWNLOAD_CACHE_DIR: &str = "cache";
+pub const SOCKET_NAME: &str = "rdir.sock";
+
 thread_local! {
     static EX: LocalExecutor<'static> = const { LocalExecutor::new() };
 }

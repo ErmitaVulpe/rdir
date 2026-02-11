@@ -5,29 +5,31 @@ use clap::Parser;
 use nix::unistd::{ForkResult, fork};
 
 mod args;
-mod client;
 mod common;
-mod server;
+// mod client;
+// mod server;
 
 fn main() -> AnyResult<()> {
     let args = args::Args::parse();
+    println!("{args:#?}");
+    Ok(())
 
-    let mut is_client = true;
-    let is_server_active = is_server_active(&args.socket);
-    if args.command.is_none() && !is_server_active {
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { .. }) => {}
-            Ok(ForkResult::Child) => {
-                is_client = false;
-            }
-            Err(e) => return Err(e).context("Failed to spawn the server"),
-        }
-    }
-
-    match is_client {
-        true => client::main(args),
-        false => server::main(args),
-    }
+    // let mut is_client = true;
+    // let is_server_active = is_server_active(&args.socket);
+    // if args.command.is_none() && !is_server_active {
+    //     match unsafe { fork() } {
+    //         Ok(ForkResult::Parent { .. }) => {}
+    //         Ok(ForkResult::Child) => {
+    //             is_client = false;
+    //         }
+    //         Err(e) => return Err(e).context("Failed to spawn the server"),
+    //     }
+    // }
+    //
+    // match is_client {
+    //     true => client::main(args),
+    //     false => server::main(args),
+    // }
 }
 
 /// Checks if the server is alive, if not, it cleans up an unused socket

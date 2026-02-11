@@ -1,5 +1,7 @@
 use bitcode::{Encode, Decode};
 
+pub mod shares;
+
 #[derive(Encode, Decode, Clone, Debug)]
 pub enum ClientMessage {
     Subscribe,
