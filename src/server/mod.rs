@@ -1,4 +1,4 @@
-use std::{os::fd::AsFd, rc::Rc, time::Duration};
+use std::{cell::RefCell, os::fd::AsFd, rc::Rc, time::Duration};
 
 use anyhow::{Context, Result as AnyResult};
 use async_broadcast::{InactiveReceiver, Sender, broadcast};
@@ -15,13 +15,15 @@ use smol::{
     stream::StreamExt,
 };
 use smol_timeout::TimeoutExt;
-use tracing::{debug, error, info, level_filters::LevelFilter};
+use tracing::{error, info, level_filters::LevelFilter};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::{
     args::Args,
-    common::{ClientMessage, ServerMessage, framing::FramedStream},
+    common::{ClientMessage, ServerMessage, framing::FramedStream}, server::state::State,
 };
+
+mod state;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
 pub const LOGS_DIR: &str = "logs";
@@ -34,6 +36,7 @@ pub struct Server<'a> {
     ex: LocalExecutor<'a>,
     // TODO Check if want to hold on to this, maybe parse as config
     args: Args,
+    state: RefCell<State>,
     shutdown_tx: Sender<()>,
     shutdown_rx: InactiveReceiver<()>,
 }
@@ -51,6 +54,7 @@ impl Server<'_> {
         let self_ = Rc::new(Self {
             ex,
             args,
+            state: RefCell::new(State::default()),
             shutdown_tx,
             shutdown_rx: shutdown_rx.clone().deactivate(),
         });
@@ -89,7 +93,20 @@ impl Server<'_> {
                 .await
                 .context("Timed out")??;
             let message: ClientMessage = decode(&buf)?;
-            debug!("Client senf: {message:?}");
+            match message {
+                ClientMessage::Connect(connect_message) => todo!(),
+                ClientMessage::Discover => todo!(),
+                ClientMessage::Kill => {
+                    let _ = self.shutdown_tx.broadcast_direct(()).await;
+                }
+                ClientMessage::Ls => todo!(),
+                ClientMessage::Ping => {
+                    stream.write(&encode(&ServerMessage::Pong)).await?;
+                }
+                ClientMessage::Share(share_message) => todo!(),
+            }
+
+            // TEMP
             stream.write(&encode(&ServerMessage::Pong)).await?;
             anyhow::Ok(())
         }

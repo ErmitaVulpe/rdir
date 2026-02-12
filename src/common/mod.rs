@@ -76,7 +76,7 @@ impl From<&ShareCommand> for ShareMessage {
     }
 }
 
-#[derive(Encode, Decode, Clone, Debug)]
+#[derive(Encode, Decode, Clone, Debug, IsVariant)]
 pub enum ServerMessage {
     Pong,
 }
