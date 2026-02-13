@@ -1,10 +1,12 @@
 use std::{
-    net::{AddrParseError, Ipv4Addr},
+    net::{AddrParseError, Ipv4Addr, SocketAddrV4},
     str::FromStr,
 };
 
 use bitcode::{Decode, Encode};
 use derive_more::{Display, Error, From, IsVariant};
+
+use crate::server::NETWORK_PORT;
 
 pub const MAX_SHARE_NAME_LENGTH: usize = 60;
 
@@ -38,9 +40,9 @@ pub enum ShareNameParseError {
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
-#[display("{addr}:{name}")]
+#[display("{addr}/{name}")]
 pub struct FullShareName {
-    addr: Ipv4Addr,
+    addr: RemotePeerAddr,
     name: CommonShareName,
 }
 
@@ -48,8 +50,8 @@ impl FromStr for FullShareName {
     type Err = FullShareNameParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (raw_addr, raw_common_name) = s.split_once(':').ok_or(Self::Err::NoSeparator)?;
-        let addr = Ipv4Addr::from_str(raw_addr)?;
+        let (raw_addr, raw_common_name) = s.split_once('/').ok_or(Self::Err::NoSeparator)?;
+        let addr = RemotePeerAddr::from_str(raw_addr)?;
         let name = CommonShareName::from_str(raw_common_name)?;
         Ok(FullShareName { addr, name })
     }
@@ -58,11 +60,53 @@ impl FromStr for FullShareName {
 #[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
 pub enum FullShareNameParseError {
     #[display("{_0}")]
-    InvalidAddress(AddrParseError),
-    #[display("{_0}")]
-    InvalidCommonShareName(CommonShareNameParseError),
-    #[display("Full share name requires a separator \":\"")]
+    InvalidAddress(#[error(source)] RemotePeerAddrParseError),
+    #[display("Failed to parse the common share name")]
+    InvalidCommonShareName(#[error(source)] CommonShareNameParseError),
+    #[display("Full share name requires a separator \"/\" between address and name")]
     NoSeparator,
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
+#[display("{addr}{}", port.as_ref()
+    .map(|p| format!(":{}", p))
+    .unwrap_or_default()
+)]
+pub struct RemotePeerAddr {
+    addr: Ipv4Addr,
+    port: Option<u16>,
+}
+
+impl FromStr for RemotePeerAddr {
+    type Err = RemotePeerAddrParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // TODO add sqids support
+        match s.split_once(':') {
+            Some((addr, port)) => Ok(Self {
+                addr: addr.parse()?,
+                port: Some(
+                    port.parse()
+                        .map_err(|_| RemotePeerAddrParseError::PortNumber(port.to_string()))?,
+                ),
+            }),
+            None => todo!(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
+pub enum RemotePeerAddrParseError {
+    #[display("Failed to parse the ip address")]
+    InvalidAddress(#[error(source)] AddrParseError),
+    #[display("Could not parse \"{_0}\" as port")]
+    PortNumber(#[error(ignore)] String),
+}
+
+impl From<&RemotePeerAddr> for SocketAddrV4 {
+    fn from(val: &RemotePeerAddr) -> Self {
+        SocketAddrV4::new(val.addr, val.port.unwrap_or(NETWORK_PORT))
+    }
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]

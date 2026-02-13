@@ -4,258 +4,129 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::Context;
 use bitcode::{Decode, Encode};
-use derive_more::{Constructor, Display, Eq, Error, From, IsVariant, PartialEq};
+use derive_more::{Display, Eq, Error, From, IsVariant, PartialEq};
 use smol::channel::Sender;
 
 use crate::common::shares::{CommonShareName, FullShareName};
 
 #[derive(Debug, Default)]
 pub struct State {
-    peers: Peers,
+    next_peer_id: u32,
+    peers: BTreeMap<PeerId, Peer>,
+    peers_by_socket: BTreeMap<SocketAddrV4, PeerId>,
     shares: BTreeMap<CommonShareName, Share>,
     connections: BTreeMap<FullShareName, Connection>,
 }
 
-impl State {
-    pub fn new_peer(&mut self, peer: Peer) -> PeerId {
-        self.peers.new_peer(peer)
-    }
-
-    pub fn remove_peer(&mut self, peer_id: PeerId) {
-        let Some(peer) = self.peers.inner.get(&peer_id) else {
-            return;
-        };
-        let share_iter = peer.used_shares.clone().into_iter();
-        let connection_iter = peer.used_connections.clone().into_iter();
-
-        for share in share_iter {
-            self.kick_from_share(share, peer_id)
-                .context(CorruptedState)
-                .unwrap();
-        }
-
-        let peer = self
-            .peers
-            .inner
-            .remove(&peer_id)
-            .context(CorruptedState)
-            .unwrap();
-        let _ = peer.shutdown_tx.try_send(());
-    }
-
-    pub fn add_share(&mut self, share: Share) -> Result<(), AddShareError> {
-        let common_name = share.name.clone();
-        let entry = self.shares.entry(common_name);
-        match entry {
-            Entry::Vacant(entry) => {
-                entry.insert(share);
-                Ok(())
+/// Helper macro to generate a new PeerId
+/// Sometimes I want to create a new PeerId while already holding a ref mut to
+/// another field of the State, hence another method does not work
+macro_rules! new_peer_id {
+    ($state:expr) => {
+        loop {
+            let id = $state.next_peer_id;
+            $state.next_peer_id = $state.next_peer_id.wrapping_add(1);
+            let peer_id = PeerId(id);
+            if !$state.peers.contains_key(&peer_id) {
+                break peer_id;
             }
-            Entry::Occupied(_) => Err(AddShareError),
         }
+    };
+}
+
+impl State {
+    pub fn new_peer_connected_to_share(
+        &mut self,
+        mut peer: Peer,
+        share_name: CommonShareName,
+    ) -> Result<PeerId, NewPeerConnectedToShareError> {
+        if self.peers_by_socket.contains_key(&peer.address) {
+            return Err(RepeatedPeer.into());
+        }
+
+        let share = match self.shares.get_mut(&share_name) {
+            Some(val) => val,
+            None => return Err(ShareDoesntExist.into()),
+        };
+
+        // all checks passed, now modifying
+        let peer_id = new_peer_id!(self);
+        peer.used_shares.insert(share_name);
+        let res = self.peers_by_socket.insert(peer.address, peer_id);
+        debug_assert!(res.is_none());
+        let res = self.peers.insert(peer_id, peer);
+        debug_assert!(res.is_none());
+        let res = share.participants.insert(peer_id);
+        debug_assert!(res);
+        Ok(peer_id)
     }
 
+    /// Must not be called after peer was dropped
     pub fn peer_connected_to_share(
         &mut self,
-        name: CommonShareName,
         peer_id: PeerId,
-    ) -> Result<(), ConnectToShareError> {
-        let entry = self.shares.entry(name);
-        match entry {
-            Entry::Vacant(_) => Err(ConnectToShareError::DoesntExist),
-            Entry::Occupied(mut entry) => match entry.get_mut().participants.insert(peer_id) {
-                true => {
-                    let inserted = self
-                        .peers
-                        .inner
-                        .get_mut(&peer_id)
-                        .context(PeerAlreadyGCed)
-                        .unwrap()
-                        .used_shares
-                        .insert(entry.key().clone());
-                    assert!(inserted);
-                    Ok(())
-                }
-                false => Err(ConnectToShareError::AlreadyConnected),
-            },
-        }
+        share_name: CommonShareName,
+    ) -> Result<(), PeerConnectedToShareError> {
+        let share = match self.shares.get_mut(&share_name) {
+            Some(val) => val,
+            None => return Err(ShareDoesntExist.into()),
+        };
+
+        self.peers
+            .get_mut(&peer_id)
+            .unwrap()
+            .used_shares
+            .insert(share_name);
+        let res = share.participants.insert(peer_id);
+        debug_assert!(res);
+        Ok(())
     }
 
+    /// Must not be called after peer was dropped
     pub fn peer_disconnected_from_share(
         &mut self,
-        name: CommonShareName,
         peer_id: PeerId,
-    ) -> Result<(), DisconnectFromShareError> {
-        let entry = self.shares.entry(name);
-        match entry {
-            Entry::Vacant(_) => Err(DisconnectFromShareError::DoesntExist),
-            Entry::Occupied(mut entry) => match entry.get_mut().participants.remove(&peer_id) {
-                true => {
-                    let peer = self
-                        .peers
-                        .inner
-                        .get_mut(&peer_id)
-                        .context(PeerAlreadyGCed)
-                        .unwrap();
-                    assert!(peer.used_shares.remove(entry.key()));
-                    self.peers.try_remove_peer(peer_id);
-                    Ok(())
-                }
-                false => Err(DisconnectFromShareError::NotConnected),
-            },
+        share_name: CommonShareName,
+    ) -> Result<(), PeerDisconnectedFromShareError> {
+        let peer = self.peers.get_mut(&peer_id).unwrap();
+        let share = self.shares.get_mut(&share_name).ok_or(ShareDoesntExist)?;
+        if !share.participants.remove(&peer_id) {
+            return Err(PeerNotUsingShare.into());
         }
+        let res = peer.used_shares.remove(&share_name);
+        debug_assert!(res);
+        self.try_drop_peer(peer_id);
+        Ok(())
     }
 
-    pub fn kick_from_share(
+    pub fn kick_peer_from_share(
         &mut self,
-        name: CommonShareName,
         peer_id: PeerId,
-    ) -> Result<(), KickFromShareError> {
-        let _ = self
-            .peers
-            .inner
-            .get(&peer_id)
-            .ok_or(KickFromShareError::NotConnected)?
-            .notification_tx
-            .try_send(StateNotification::KickedFromShare(name.clone()));
-        self.peer_disconnected_from_share(name, peer_id)?;
+        share_name: CommonShareName,
+    ) -> Result<(), KickPeerFromShareError> {
+        let peer = self.peers.get_mut(&peer_id).unwrap();
+        let share = self.shares.get_mut(&share_name).ok_or(ShareDoesntExist)?;
+        if !share.participants.remove(&peer_id) {
+            return Err(PeerNotUsingShare.into());
+        }
+        let res = peer.used_shares.remove(&share_name);
+        debug_assert!(res);
+        peer.notification_tx
+            .try_send(StateNotification::KickedFromShare(share_name))
+            .unwrap();
+        self.try_drop_peer(peer_id);
         Ok(())
     }
 
-    pub fn remove_share(&mut self, name: &CommonShareName) -> Result<(), RemoveShareError> {
-        let (k, v) = self
-            .shares
-            .remove_entry(name)
-            .ok_or(RemoveShareError::DoesntExist)?;
-
-        for peer_id in v.participants.into_iter() {
-            let peer = self
-                .peers
-                .inner
-                .get_mut(&peer_id)
-                .context(CorruptedState)
-                .unwrap();
-
-            let _ = peer
-                .notification_tx
-                .try_send(StateNotification::KickedFromShare(k.clone()));
-            let removed = peer.used_shares.remove(&k);
-            assert!(removed);
-
-            self.peers.try_remove_peer(peer_id);
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-impl State {
-    fn integrity_check(&self) {
-        // 1. validate peers
-        for (peer_id, peer) in &self.peers.inner {
-            for share_name in &peer.used_shares {
-                let share = self.shares.get(share_name).unwrap();
-                assert!(share.participants.contains(peer_id));
-            }
-
-            for connection_name in &peer.used_connections {
-                let connection = self.connections.get(connection_name).unwrap();
-                assert!(connection.participants.contains(peer_id));
-            }
-        }
-
-        // 2. validate shares
-        for (share_name, share) in &self.shares {
-            for peer_id in &share.participants {
-                let peer = self.peers.inner.get(peer_id).unwrap();
-                assert!(peer.used_shares.contains(share_name));
-            }
-        }
-
-        // 3. validate connections
-        for (connection_name, connection) in &self.connections {
-            for peer_id in &connection.participants {
-                let peer = self.peers.inner.get(peer_id).unwrap();
-                assert!(peer.used_connections.contains(connection_name));
-            }
-        }
-    }
-}
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-#[display("State is corrupted")]
-pub struct CorruptedState;
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-#[display("Share name already taken")]
-pub struct AddShareError;
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-pub enum ConnectToShareError {
-    #[display("Tried to connect to a share that doesnt exist")]
-    DoesntExist,
-    #[display("Already connected to this share")]
-    AlreadyConnected,
-}
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-pub enum DisconnectFromShareError {
-    #[display("Tried to disconnect from a share that doesnt exist")]
-    DoesntExist,
-    #[display("Not connected to this share")]
-    NotConnected,
-}
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-pub enum KickFromShareError {
-    #[display("Tried to kick from a share that doesnt exist")]
-    DoesntExist,
-    #[display("Peer wasnt connected to this share")]
-    NotConnected,
-}
-
-impl From<DisconnectFromShareError> for KickFromShareError {
-    fn from(value: DisconnectFromShareError) -> Self {
-        match value {
-            DisconnectFromShareError::DoesntExist => Self::DoesntExist,
-            DisconnectFromShareError::NotConnected => Self::NotConnected,
-        }
-    }
-}
-
-#[derive(Debug, Display, Error, PartialEq, Eq)]
-pub enum RemoveShareError {
-    #[display("Tried to remove a share that doesnt exist")]
-    DoesntExist,
-}
-
-/// Automatically sends a shutdown msg on peer drop
-#[derive(Debug, Default)]
-struct Peers {
-    next_peer_id: u32,
-    /// key is the number of mutual shares
-    inner: BTreeMap<PeerId, Peer>,
-}
-
-impl Peers {
-    fn new_peer(&mut self, peer: Peer) -> PeerId {
-        loop {
-            let id = self.next_peer_id;
-            self.next_peer_id = self.next_peer_id.wrapping_add(1);
-            let peer_id = PeerId::from(id);
-            if let Entry::Vacant(e) = self.inner.entry(peer_id) {
-                e.insert(peer);
-                return peer_id;
-            }
-        }
+    pub fn remove_peer(&mut self, peer_id: PeerId) -> Result<(), RemovePeerError> {
+        todo!()
     }
 
-    /// Removes only if no common shares are left
-    fn try_remove_peer(&mut self, id: PeerId) -> bool {
-        let entry = self.inner.entry(id);
+    /// removes a peer if it can
+    /// must not be called after peer was dropped
+    fn try_drop_peer(&mut self, peer_id: PeerId) -> bool {
+        let entry = self.peers.entry(peer_id);
         match entry {
             Entry::Vacant(_) => unreachable!("Tried to remove a non existing peer"),
             Entry::Occupied(entry) => {
@@ -270,36 +141,100 @@ impl Peers {
         }
     }
 
-    fn get_inner(&self) -> &BTreeMap<PeerId, Peer> {
-        &self.inner
-    }
-}
-
-#[derive(Debug)]
-pub struct Share {
-    name: CommonShareName,
-    path: PathBuf,
-    participants: BTreeSet<PeerId>,
-}
-
-impl Share {
-    fn new(name: CommonShareName, path: PathBuf) -> Self {
-        Self {
-            name,
-            path,
-            participants: Default::default(),
+    pub fn add_share(&mut self, share: Share) -> Result<(), RepeatedShare> {
+        let common_name = share.name.clone();
+        let entry = self.shares.entry(common_name);
+        match entry {
+            Entry::Vacant(entry) => {
+                entry.insert(share);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(RepeatedShare),
         }
     }
+
+    pub fn remove_share(&mut self, name: &CommonShareName) -> Result<(), RemoveShareError> {
+        let (name, share) = self.shares.remove_entry(name).ok_or(ShareDoesntExist)?;
+
+        for participant_id in share.participants {
+            let peer = self.peers.get_mut(&participant_id).unwrap();
+            let res = peer.used_shares.remove(&name);
+            assert!(res);
+            peer.notification_tx
+                .try_send(StateNotification::KickedFromShare(name.clone()))
+                .unwrap();
+            self.try_drop_peer(participant_id);
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Clone, Copy, Debug, From, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerId(u32);
+#[derive(Encode, Decode, Debug, Display, Error, PartialEq, Eq)]
+#[display("Specified share doesnt exist")]
+pub struct ShareDoesntExist;
 
-#[derive(Debug, Display)]
-#[display(
-    "Tried to do an operation with a peer that already got garbage collected,\ntry reordering operations"
-)]
-struct PeerAlreadyGCed;
+#[derive(Encode, Decode, Debug, Display, Error, PartialEq, Eq)]
+#[display("Specified peer doesnt exist")]
+pub struct PeerDoesntExist;
+
+#[derive(Encode, Decode, Debug, Display, Error, PartialEq, Eq)]
+#[display("Specified peer already exists")]
+pub struct RepeatedPeer;
+
+#[derive(Encode, Decode, Debug, Display, Error, PartialEq, Eq)]
+#[display("Peer isnt connected to this share")]
+pub struct PeerNotUsingShare;
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("New peer failed to connect to a share")]
+pub enum NewPeerConnectedToShareError {
+    RepeatedPeer(RepeatedPeer),
+    ShareDoesntExist(ShareDoesntExist),
+}
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Peer failed to connect to a share")]
+pub enum PeerConnectedToShareError {
+    PeerDoesntExist(PeerDoesntExist),
+    ShareDoesntExist(ShareDoesntExist),
+}
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Couldnt disconnect peer from a share")]
+pub enum PeerDisconnectedFromShareError {
+    PeerNotUsingShare(PeerNotUsingShare),
+    ShareDoesntExist(ShareDoesntExist),
+}
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Failed to kick a peer")]
+pub enum KickPeerFromShareError {
+    PeerNotUsingShare(PeerNotUsingShare),
+    ShareDoesntExist(ShareDoesntExist),
+}
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Failed to remove a peer")]
+pub enum RemovePeerError {}
+
+#[derive(Encode, Decode, Debug, Display, Error, PartialEq, Eq)]
+#[display("Share with this name already exists")]
+pub struct RepeatedShare;
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Failed to add a share")]
+pub enum AddShareError {}
+
+#[derive(Encode, Decode, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Failed to remove a share")]
+pub enum RemoveShareError {
+    ShareDoesntExist(ShareDoesntExist),
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PeerId(u32);
 
 #[derive(Clone, Debug)]
 pub struct Peer {
@@ -326,26 +261,33 @@ impl Peer {
     }
 }
 
-#[derive(Encode, Decode, Clone, Debug, Display, From, IsVariant, PartialEq, Eq)]
-pub enum StateNotification {
-    KickedFromShare(CommonShareName),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Connection {
-    name: FullShareName,
-    mount_path: PathBuf,
+#[derive(Debug)]
+pub struct Share {
+    pub name: CommonShareName,
+    pub path: PathBuf,
     participants: BTreeSet<PeerId>,
 }
 
-impl Connection {
-    pub fn new(name: FullShareName, mount_path: PathBuf) -> Self {
+impl Share {
+    fn new(name: CommonShareName, path: PathBuf) -> Self {
         Self {
             name,
-            mount_path,
+            path,
             participants: Default::default(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct Connection {
+    owner: PeerId,
+    name: FullShareName,
+    mount_path: PathBuf,
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, From, IsVariant, PartialEq, Eq)]
+pub enum StateNotification {
+    KickedFromShare(CommonShareName),
 }
 
 #[cfg(test)]
@@ -356,43 +298,44 @@ mod tests {
 
     use super::*;
 
+    impl State {
+        fn integrity_check(&self) {
+            // 1. validate peers
+            for (peer_id, peer) in &self.peers {
+                for share_name in &peer.used_shares {
+                    let share = self.shares.get(share_name).unwrap();
+                    assert!(share.participants.contains(peer_id));
+                }
+
+                for connection_name in &peer.used_connections {
+                    let connection = self.connections.get(connection_name).unwrap();
+                    assert_eq!(&connection.owner, peer_id);
+                }
+            }
+
+            // 2. validate shares
+            for (share_name, share) in &self.shares {
+                for peer_id in &share.participants {
+                    let peer = self.peers.get(peer_id).unwrap();
+                    assert!(peer.used_shares.contains(share_name));
+                }
+            }
+
+            // 3. validate connections
+            for (connection_name, connection) in &self.connections {
+                let peer = self.peers.get(&connection.owner).unwrap();
+                assert!(peer.used_connections.contains(connection_name));
+            }
+        }
+    }
+
+    /// test utility
     fn new_peer(id: u8) -> (Peer, Receiver<()>, Receiver<StateNotification>) {
         let address = SocketAddrV4::new([id; 4].into(), NETWORK_PORT);
         let (shutdown_tx, shutdown_rx) = unbounded();
         let (notification_tx, notification_rx) = unbounded();
         let peer = Peer::new(address, shutdown_tx, notification_tx);
         (peer, shutdown_rx, notification_rx)
-    }
-
-    #[test]
-    fn managing_peers() {
-        let mut state = State::default();
-        let (peer1, shutdown_rx1, _) = new_peer(1);
-        let peer_id1 = state.new_peer(peer1);
-        assert_eq!(peer_id1.0, 0);
-        assert_eq!(state.peers.next_peer_id, 1);
-        state.integrity_check();
-
-        state.peers.next_peer_id = u32::MAX;
-
-        let (peer2, shutdown_rx2, _) = new_peer(2);
-        let peer_id2 = state.new_peer(peer2);
-        assert_eq!(peer_id2.0, u32::MAX);
-        assert_eq!(state.peers.next_peer_id, 0);
-        state.integrity_check();
-
-        let (peer3, shutdown_rx3, _) = new_peer(3);
-        let peer_id3 = state.new_peer(peer3);
-        assert_eq!(peer_id3.0, 1);
-        assert_eq!(state.peers.next_peer_id, 2);
-        state.integrity_check();
-
-        state.remove_peer(peer_id1);
-        assert!(shutdown_rx1.try_recv().is_ok());
-        assert!(shutdown_rx2.try_recv().is_err());
-        assert!(shutdown_rx3.try_recv().is_err());
-        assert_eq!(state.peers.inner.len(), 2);
-        state.integrity_check();
     }
 
     #[test]
@@ -407,16 +350,18 @@ mod tests {
         state.integrity_check();
 
         assert!(state.add_share(share1).is_ok());
-        assert_eq!(state.add_share(share2), Err(AddShareError));
+        assert_eq!(state.add_share(share2), Err(RepeatedShare));
         assert!(state.add_share(share3).is_ok());
         assert_eq!(state.shares.len(), 2);
         state.integrity_check();
 
         state.remove_share(&a_name).unwrap();
         state.remove_share(&b_name).unwrap();
-        assert_eq!(
-            state.remove_share(&c_name),
-            Err(RemoveShareError::DoesntExist)
+        assert!(
+            state
+                .remove_share(&c_name)
+                .unwrap_err()
+                .is_share_doesnt_exist()
         );
         assert_eq!(state.shares.len(), 0);
         state.integrity_check();
@@ -432,41 +377,40 @@ mod tests {
         state.add_share(share1).unwrap();
         state.add_share(share2).unwrap();
         let (peer, shutdown_rx, _) = new_peer(1);
-        let peer_id = state.new_peer(peer);
         state.integrity_check();
 
-        state
-            .peer_connected_to_share(share_name1.clone(), peer_id)
+        let peer_id = state
+            .new_peer_connected_to_share(peer, share_name1.clone())
             .unwrap();
-        let peer_ref = state.peers.inner.get(&peer_id).unwrap();
+        let peer_ref = state.peers.get(&peer_id).unwrap();
         assert_eq!(peer_ref.used_connections.len(), 0);
         assert_eq!(peer_ref.used_shares.len(), 1);
         state.integrity_check();
         state
-            .peer_connected_to_share(share_name2.clone(), peer_id)
+            .peer_connected_to_share(peer_id, share_name2.clone())
             .unwrap();
-        let peer_ref = state.peers.inner.get(&peer_id).unwrap();
+        let peer_ref = state.peers.get(&peer_id).unwrap();
         assert_eq!(peer_ref.used_connections.len(), 0);
         assert_eq!(peer_ref.used_shares.len(), 2);
         state.integrity_check();
         // Now peer uses 2 shares
 
         state
-            .peer_disconnected_from_share(share_name1.clone(), peer_id)
+            .peer_disconnected_from_share(peer_id, share_name1.clone())
             .unwrap();
-        assert!(state.peers.inner.get(&peer_id).is_some());
+        assert!(state.peers.get(&peer_id).is_some());
         state.integrity_check();
 
         state
-            .peer_disconnected_from_share(share_name1.clone(), peer_id)
+            .peer_disconnected_from_share(peer_id, share_name1.clone())
             .unwrap_err();
         state.integrity_check();
         assert!(shutdown_rx.try_recv().is_err());
 
         state
-            .peer_disconnected_from_share(share_name2.clone(), peer_id)
+            .peer_disconnected_from_share(peer_id, share_name2.clone())
             .unwrap();
-        assert!(state.peers.inner.get(&peer_id).is_none());
+        assert!(state.peers.get(&peer_id).is_none());
         assert!(shutdown_rx.try_recv().is_ok());
         state.integrity_check();
     }
@@ -481,26 +425,25 @@ mod tests {
         state.add_share(share1).unwrap();
         state.add_share(share2).unwrap();
         let (peer, shutdown_rx, notification_rx) = new_peer(1);
-        let peer_id = state.new_peer(peer);
         state.integrity_check();
 
-        state
-            .peer_connected_to_share(share_name1.clone(), peer_id)
+        let peer_id = state
+            .new_peer_connected_to_share(peer, share_name1.clone())
             .unwrap();
         state
-            .peer_connected_to_share(share_name2.clone(), peer_id)
+            .peer_connected_to_share(peer_id, share_name2.clone())
             .unwrap();
         state.integrity_check();
 
         state.remove_share(&share_name1).unwrap();
         state.integrity_check();
-        assert!(state.peers.inner.get(&peer_id).is_some());
+        assert!(state.peers.get(&peer_id).is_some());
         assert!(notification_rx.try_recv().unwrap().is_kicked_from_share());
         assert!(shutdown_rx.try_recv().is_err());
 
         state.remove_share(&share_name2).unwrap();
         state.integrity_check();
-        assert!(state.peers.inner.get(&peer_id).is_none());
+        assert!(state.peers.get(&peer_id).is_none());
         assert!(notification_rx.try_recv().unwrap().is_kicked_from_share());
         assert!(shutdown_rx.try_recv().is_ok());
     }
