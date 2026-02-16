@@ -7,7 +7,7 @@ use smol::{LocalExecutor, Timer, io, net::unix::UnixStream};
 
 use crate::{
     args::Args,
-    common::{ClientMessage, ServerMessage, framing::FramedStream},
+    common::{ClientMessage, ServerResponse, framing::FramedStream},
     server::SOCKET_NAME,
 };
 
@@ -41,7 +41,7 @@ impl Client<'_> {
         };
         let mut stream = FramedStream::new(sock);
         stream.write(&encode(&ClientMessage::from(&args))).await?;
-        let resp: ServerMessage = decode(&stream.read().await?)?;
+        let resp: ServerResponse = decode(&stream.read().await?)?;
         println!("resp: {resp:?}");
 
         Ok(())

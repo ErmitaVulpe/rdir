@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::SocketAddrV4, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
@@ -22,12 +22,22 @@ pub struct Args {
         value_parser=tmpdir_parser,
     )]
     pub tmp_dir: PathBuf,
+    /// Server TCP bind socket
+    #[arg(env = "RDIR_TCP_SOCKET", global = true, long = "tcp-socket")]
+    pub tcp_socket: Option<SocketAddrV4>,
+    /// Server UDP bind socket
+    #[arg(env = "RDIR_UDP_SOCKET", global = true, long = "udp-socket")]
+    pub udp_socket: Option<SocketAddrV4>,
 }
 
 impl Args {
     pub fn expects_active_server(&self) -> bool {
-        match self.command {
-            Command::Connect { .. } | Command::Discover | Command::Share { .. } => true,
+        match &self.command {
+            Command::Connect { .. } | Command::Discover => true,
+            Command::Share { command } => match command {
+                ShareCommand::Remove { .. } | ShareCommand::Share { .. } => true,
+                ShareCommand::Ls => false,
+            },
             Command::Kill | Command::Ls => false,
         }
     }
@@ -35,7 +45,7 @@ impl Args {
 
 #[derive(Debug, IsVariant, Subcommand)]
 pub enum Command {
-    /// manage Connections
+    /// manage remote shares
     #[command(short_flag = 'C', alias = "c")]
     Connect {
         #[command(subcommand)]
@@ -60,10 +70,10 @@ pub enum Command {
 
 #[derive(Debug, IsVariant, Subcommand)]
 pub enum ConnectCommand {
-    /// List connections
+    /// List used remote shares
     #[command(short_flag = 'l', alias = "l")]
     Ls,
-    /// Mount a new connection
+    /// Mount a new remote share
     #[command(short_flag = 'm', alias = "m")]
     Mount {
         /// Name of the remote share. If address is omitted, tries to search the local network
@@ -73,10 +83,10 @@ pub enum ConnectCommand {
         #[arg(value_hint=ValueHint::DirPath)]
         path: PathBuf,
     },
-    /// Unmount a connection
+    /// Unmount a remote share
     #[command(short_flag = 'u', alias = "u")]
     Unmount {
-        /// Name of the connection, if ambiguous specify as <IP>:<NAME>
+        /// Name of the remote share, if ambiguous specify as <IP>:<NAME>
         #[arg()]
         name: ShareName,
     },
