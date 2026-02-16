@@ -15,7 +15,7 @@ use snow::{Builder, HandshakeState, TransportState, params::NoiseParams};
 pub const FRAMED_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 static PARAMS: LazyLock<NoiseParams> =
-    LazyLock::new(|| "Noise_XX_25519_AESGCM_SHA256".parse().unwrap());
+    LazyLock::new(|| "Noise_NN_25519_AESGCM_SHA256".parse().unwrap());
 
 pub struct FramedTcpStream {
     stream: TcpStream,
