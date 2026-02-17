@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result as AnyResult, bail};
 use async_broadcast::{InactiveReceiver, Sender, broadcast};
-use bitcode::{decode, encode};
+use bitcode::{Decode, Encode, decode, encode};
 use derive_more::{Display, Error, From, IsVariant};
 use futures::TryFutureExt;
 use nix::{
@@ -20,6 +20,7 @@ use smol::{
     LocalExecutor,
     channel::{Receiver, bounded, unbounded},
     future::FutureExt,
+    io,
     net::{
         TcpListener, TcpStream,
         unix::{UnixListener, UnixStream},
@@ -27,7 +28,7 @@ use smol::{
     stream::StreamExt,
 };
 use smol_timeout::TimeoutExt;
-use tracing::{error, info, level_filters::LevelFilter};
+use tracing::{debug, error, info, level_filters::LevelFilter};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::{
@@ -40,12 +41,15 @@ use crate::{
     server::{
         messages::{PeerInitConnectToShareResponse, PeerInitListSharesRosponse, PeerInitMessage},
         net::{FramedError, FramedTcpStream},
-        state::{Peer, PeerId, Share, ShareDoesntExistError, State, StateNotification},
+        state::{
+            NewPeerConnectedToShareError, Peer, PeerId, RepeatedPeerError,
+            RepeatedRemoteShareError, Share, ShareDoesntExistError, State, StateNotification,
+        },
     },
 };
 
 mod messages;
-mod net;
+pub mod net;
 pub mod state;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
@@ -117,27 +121,39 @@ impl Server<'_> {
     }
 
     async fn handle_client(self: Rc<Self>, stream: UnixStream) {
-        let value = async {
-            let mut stream = FramedStream::new(stream);
+        let mut stream = FramedStream::new(stream);
+        let result = async {
             let buf = stream
                 .read()
                 .timeout(Duration::from_millis(500))
                 .await
-                .context("Timed out")??;
+                .context("Client timed out")??;
             let message: ClientMessage = decode(&buf)?;
+            anyhow::Ok(message)
+        };
+        let message = match result.await {
+            Ok(val) => val,
+            Err(err) => {
+                error!("Error while accepting the client {err}");
+                return;
+            }
+        };
+        debug!("Client sent: {message:?}");
 
+        let result: Result<ServerResponse, ServerError> = async {
             match message {
                 ClientMessage::Connect(connect_message) => match connect_message {
                     ConnectMessage::Ls => {
-                        let buf = encode(&self.state.borrow().remote_shares_dto());
-                        stream.write(&buf).await?;
+                        let shares = self.state.borrow().remote_shares_dto();
+                        Ok(ServerResponse::LsMountedShares(shares))
                     }
                     ConnectMessage::Mount { path, name } => {
                         let path = PathBuf::from(path);
                         match name {
                             ShareName::Common(_share_name) => todo!("Make autodiscovery"),
                             ShareName::Full(share_name) => {
-                                self.connect_to_remote_share(share_name, path).await?
+                                self.connect_to_remote_share(share_name, path).await?;
+                                Ok(ServerResponse::Ok)
                             }
                         }
                     }
@@ -146,71 +162,49 @@ impl Server<'_> {
                 ClientMessage::Discover => todo!(),
                 ClientMessage::Kill => {
                     let _ = self.shutdown_tx.try_broadcast(());
-                    stream.write(&encode(&ServerResponse::Ok)).await?;
+                    Ok(ServerResponse::Ok)
                 }
                 ClientMessage::Ls => {
-                    let msg = {
-                        let lock = self.state.borrow();
-                        ServerResponse::Status {
-                            peers: lock.peers_dto(),
-                            remote_shares: lock.remote_shares_dto(),
-                            shares: lock.shares_dto(),
-                        }
-                    };
-                    let buf = encode(&msg);
-                    stream.write(&buf).await?;
+                    let lock = self.state.borrow();
+                    Ok(ServerResponse::Status {
+                        peers: lock.peers_dto(),
+                        remote_shares: lock.remote_shares_dto(),
+                        shares: lock.shares_dto(),
+                    })
                 }
-                ClientMessage::Ping => {
-                    stream.write(&encode(&ServerResponse::Pong)).await?;
-                }
+                ClientMessage::Ping => Ok(ServerResponse::Ok),
                 ClientMessage::Share(share_message) => match share_message {
                     ShareMessage::Ls => {
                         let shares = self.state.borrow().shares_dto();
-                        let msg = ServerResponse::LsShares(shares);
-                        stream.write(&encode(&msg)).await?;
+                        Ok(ServerResponse::LsShares(shares))
                     }
-                    ShareMessage::Remove { name } => {
-                        let msg: ServerResponse = self
-                            .state
-                            .borrow_mut()
-                            .remove_share(&name, &self.shutdown_tx)
-                            .into();
-                        stream.write(&encode(&msg)).await?;
-                    }
+                    ShareMessage::Remove { name } => Ok(self
+                        .state
+                        .borrow_mut()
+                        .remove_share(&name, &self.shutdown_tx)
+                        .into()),
                     ShareMessage::Share { path, name } => {
                         let path = PathBuf::from(path);
                         let name = match name {
                             Some(val) => val,
-                            None => {
-                                let result = path
-                                    .file_name()
-                                    .ok_or(ServerError::InvalidShareName)
-                                    .and_then(|n| n.to_string_lossy().parse().map_err(Into::into));
-                                match result {
-                                    Ok(val) => val,
-                                    Err(err) => {
-                                        stream
-                                            .write(&encode(&ServerResponse::Err(err.clone())))
-                                            .await?;
-                                        return Err(anyhow::Error::new(err));
-                                    }
-                                }
-                            }
+                            None => path
+                                .file_name()
+                                .ok_or(ServerError::InvalidShareName)
+                                .and_then(|n| n.to_string_lossy().parse().map_err(Into::into))?,
                         };
                         let share = Share::new(name, path);
-                        let msg: ServerResponse = self.state.borrow_mut().add_share(share).into();
-                        stream.write(&encode(&msg)).await?;
+                        Ok(self.state.borrow_mut().add_share(share).into())
                     }
                 },
             }
-
-            anyhow::Ok(())
         }
         .await;
 
-        if let Err(err) = value {
-            error!("Error during handling local client: {err}");
-        }
+        let resp = result
+            .inspect_err(|e| error!("Error during handling local client: {e}"))
+            .unwrap_or_else(ServerResponse::from);
+        let _ = stream.write(&encode(&resp)).await;
+        self.state.borrow().should_server_close(&self.shutdown_tx);
     }
 
     async fn accept_peer(self: Rc<Self>, listener: TcpListener) -> AnyResult<()> {
@@ -218,6 +212,7 @@ impl Server<'_> {
 
         while let Some(stream) = incoming.next().await {
             let stream = stream?;
+            debug!("Received a connection from peer");
             self.ex.spawn(self.clone().handle_peer(stream)).detach();
         }
 
@@ -226,13 +221,11 @@ impl Server<'_> {
 
     async fn handle_peer(self: Rc<Self>, stream: TcpStream) {
         let value = async {
+            debug!("Entered `handle_peer`");
             let mut stream = FramedTcpStream::new_responder(stream).await?;
-            let buf = stream
-                .read()
-                .timeout(Duration::from_millis(1000))
-                .await
-                .context("Timed out")??;
+            let buf = stream.read_timeout().await?;
             let message: PeerInitMessage = decode(&buf)?;
+            debug!("Peer sent a message: {message:?}");
 
             match message {
                 PeerInitMessage::ConnectToShare { name } => {
@@ -283,10 +276,10 @@ impl Server<'_> {
     }
 
     async fn connect_to_remote_share(
-        self: Rc<Self>,
+        self: &Rc<Self>,
         share_name: FullShareName,
         mount_path: PathBuf,
-    ) -> AnyResult<()> {
+    ) -> Result<(), ConnectToRemoteShareError> {
         let mut stream = FramedTcpStream::new_initiator((&share_name.addr).into()).await?;
         stream
             .write(&encode(&PeerInitMessage::ConnectToShare {
@@ -294,13 +287,13 @@ impl Server<'_> {
             }))
             .await?;
         let resp: PeerInitConnectToShareResponse =
-            decode(&stream.read().await?).map_err(|_| ProtocolError)?;
+            decode(&stream.read_timeout().await?).map_err(|_| ProtocolError)?;
         if let PeerInitConnectToShareResponse::Err(err) = resp {
             return Err(err.into());
         }
 
         let SocketAddr::V4(address) = stream.peer_addr()? else {
-            bail!("IPv6 is unsupported");
+            panic!("IPv6 is unsupported");
         };
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (notification_tx, notification_rx) = unbounded();
@@ -354,6 +347,12 @@ impl Server<'_> {
             .with_max_level(LevelFilter::DEBUG)
             .with_writer(non_blocking)
             .init();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            error!(
+                message = %panic_info,
+                "panic occurred"
+            );
+        }));
 
         guard
     }
@@ -394,7 +393,7 @@ impl Server<'_> {
     }
 }
 
-#[derive(Clone, Debug, Display, Error)]
+#[derive(Encode, Decode, Clone, Debug, Display, Error)]
 #[display("Other side sent an unexpected message")]
 pub struct ProtocolError;
 
@@ -410,5 +409,24 @@ pub enum ListPeerSharesError {
 pub enum ConnectToRemoteShareError {
     Io(FramedError),
     ShareDoesntExist(ShareDoesntExistError),
+    #[display("Tried to connect to the same share for the second time")]
+    RepeatedRemoteShare(RepeatedRemoteShareError),
+    #[display("Tried to open a new connection to a server while already connected")]
+    RepeatedPeer(RepeatedPeerError),
     ProtocolError(ProtocolError),
+}
+
+impl From<NewPeerConnectedToShareError> for ConnectToRemoteShareError {
+    fn from(value: NewPeerConnectedToShareError) -> Self {
+        match value {
+            NewPeerConnectedToShareError::RepeatedPeer(err) => Self::RepeatedPeer(err),
+            NewPeerConnectedToShareError::ShareDoesntExist(err) => Self::ShareDoesntExist(err),
+        }
+    }
+}
+
+impl From<io::Error> for ConnectToRemoteShareError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(FramedError::Io(value))
+    }
 }

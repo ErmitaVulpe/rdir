@@ -42,9 +42,13 @@ impl Client<'_> {
         let mut stream = FramedStream::new(sock);
         stream.write(&encode(&ClientMessage::from(&args))).await?;
         let resp: ServerResponse = decode(&stream.read().await?)?;
-        println!("resp: {resp:?}");
-
-        Ok(())
+        match resp {
+            ServerResponse::Err(err) => Err(anyhow::Error::from(err)),
+            resp @ _ => {
+                print!("{}", resp);
+                Ok(())
+            }
+        }
     }
 }
 

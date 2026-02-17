@@ -4,7 +4,7 @@ use std::{
 };
 
 use bitcode::{Decode, Encode};
-use derive_more::{Display, Error, From, IsVariant};
+use derive_more::{AsRef, Display, Error, From, IsVariant};
 
 use crate::server::NETWORK_PORT;
 
@@ -124,7 +124,7 @@ impl From<&RemotePeerAddr> for SocketAddrV4 {
     }
 }
 
-#[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Encode, Decode, AsRef, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CommonShareName(String);
 
 impl FromStr for CommonShareName {

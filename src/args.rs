@@ -1,7 +1,8 @@
-use std::{net::SocketAddrV4, path::PathBuf};
+use std::{fs::canonicalize, net::SocketAddrV4, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
+use smol::io;
 
 use crate::common::shares::{CommonShareName, ShareName};
 
@@ -80,7 +81,7 @@ pub enum ConnectCommand {
         #[arg()]
         name: ShareName,
         /// Path to a dir to mount the share
-        #[arg(value_hint=ValueHint::DirPath)]
+        #[arg(value_hint=ValueHint::DirPath, value_parser=existing_path_parser)]
         path: PathBuf,
     },
     /// Unmount a remote share
@@ -108,7 +109,7 @@ pub enum ShareCommand {
     #[command(short_flag = 's', alias = "s")]
     Share {
         /// Path to dir a share
-        #[arg(value_hint=ValueHint::DirPath)]
+        #[arg(value_hint=ValueHint::DirPath, value_parser=existing_path_parser)]
         path: PathBuf,
         /// Name of the share, defaults to the name of the shared dir
         #[arg()]
@@ -123,4 +124,8 @@ fn tmpdir_parser(s: &str) -> Result<PathBuf, &'static str> {
     }
     path.push("rdir");
     Ok(path)
+}
+
+fn existing_path_parser(s: &str) -> io::Result<PathBuf> {
+    canonicalize(s)
 }

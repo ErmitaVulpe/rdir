@@ -9,7 +9,7 @@ use derive_more::{Display, Eq, Error, From, IsVariant, PartialEq};
 use smol::channel::Sender;
 
 use crate::common::{
-    RemoteShareDto, ShareDto,
+    PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
     shares::{CommonShareName, FullShareName, RemotePeerAddr},
 };
 
@@ -55,16 +55,16 @@ impl State {
         &self.remote_shares
     }
 
-    pub fn peers_dto(&self) -> BTreeMap<PeerId, SocketAddrV4> {
+    pub fn peers_dto(&self) -> PeersDto {
         let mut data = BTreeMap::new();
         for (peer_name, peer) in &self.peers {
             data.insert(*peer_name, peer.address);
         }
 
-        data
+        PeersDto(data)
     }
 
-    pub fn remote_shares_dto(&self) -> BTreeMap<RemotePeerAddr, Vec<RemoteShareDto>> {
+    pub fn remote_shares_dto(&self) -> RemoteSharesDto {
         let mut data = BTreeMap::new();
         for (remote_share_name, remote_share) in &self.remote_shares {
             let entry = data.entry(remote_share_name.addr.clone());
@@ -78,11 +78,11 @@ impl State {
             }
         }
 
-        data
+        RemoteSharesDto(data)
     }
 
-    pub fn shares_dto(&self) -> Vec<ShareDto> {
-        self.shares.values().map(ShareDto::from).collect()
+    pub fn shares_dto(&self) -> SharesDto {
+        SharesDto(self.shares.values().map(ShareDto::from).collect())
     }
 
     pub fn new_peer_connected_to_share(
@@ -238,7 +238,7 @@ impl State {
         name: FullShareName,
         mount_path: PathBuf,
     ) -> Result<PeerId, RepeatedRemoteShareError> {
-        debug_assert!(self.peers_by_socket.contains_key(&peer.address));
+        debug_assert!(!self.peers_by_socket.contains_key(&peer.address));
         let Entry::Vacant(entry) = self.remote_shares.entry(name) else {
             return Err(RepeatedRemoteShareError);
         };
@@ -302,7 +302,7 @@ impl State {
         Ok(())
     }
 
-    fn should_server_close(&self, shutdown_tx: &async_broadcast::Sender<()>) {
+    pub fn should_server_close(&self, shutdown_tx: &async_broadcast::Sender<()>) {
         if self.peers.is_empty() && self.shares.is_empty() {
             let _ = shutdown_tx.try_broadcast(());
         }
@@ -372,7 +372,7 @@ pub enum ExitPeerShareError {
 }
 
 #[must_use]
-#[derive(Encode, Decode, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Encode, Decode, Clone, Copy, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerId(u32);
 
 #[derive(Clone, Debug)]

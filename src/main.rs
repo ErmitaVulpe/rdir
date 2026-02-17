@@ -44,7 +44,6 @@ fn main() -> AnyResult<()> {
     match is_client {
         true => client::Client::run(args, maybe_sock),
         false => server::Server::run(args, maybe_listener.unwrap()),
-        // false => server::main(args),
     }
 }
 
