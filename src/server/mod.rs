@@ -40,7 +40,7 @@ use crate::{
     },
     server::{
         messages::{PeerInitConnectToShareResponse, PeerInitListSharesRosponse, PeerInitMessage},
-        net::{FramedError, FramedTcpStream},
+        net::{NoiseStream, NoiseStreamError, accept_from_peer},
         state::{
             NewPeerConnectedToShareError, Peer, PeerId, RepeatedPeerError,
             RepeatedRemoteShareError, Share, ShareDoesntExistError, State, StateNotification,
@@ -222,7 +222,8 @@ impl Server<'_> {
     async fn handle_peer(self: Rc<Self>, stream: TcpStream) {
         let value = async {
             debug!("Entered `handle_peer`");
-            let mut stream = FramedTcpStream::new_responder(stream).await?;
+            let mut stream = accept_from_peer(stream).await?;
+            stream.open_stream(cx);
             let buf = stream.read_timeout().await?;
             let message: PeerInitMessage = decode(&buf)?;
             debug!("Peer sent a message: {message:?}");
@@ -280,7 +281,7 @@ impl Server<'_> {
         share_name: FullShareName,
         mount_path: PathBuf,
     ) -> Result<(), ConnectToRemoteShareError> {
-        let mut stream = FramedTcpStream::new_initiator((&share_name.addr).into()).await?;
+        let mut stream = NoiseStream::new_initiator((&share_name.addr).into()).await?;
         stream
             .write(&encode(&PeerInitMessage::ConnectToShare {
                 name: share_name.name.clone(),
@@ -313,7 +314,7 @@ impl Server<'_> {
         self: Rc<Self>,
         addr: SocketAddrV4,
     ) -> Result<PeerInitListSharesRosponse, ListPeerSharesError> {
-        let mut stream = FramedTcpStream::new_initiator(addr).await?;
+        let mut stream = NoiseStream::new_initiator(addr).await?;
         stream.write(&encode(&PeerInitMessage::ListShares)).await?;
         let resp: PeerInitListSharesRosponse =
             decode(&stream.read().await?).map_err(|_| ProtocolError)?;
@@ -400,14 +401,14 @@ pub struct ProtocolError;
 #[derive(Debug, Display, Error, From, IsVariant)]
 #[display("Failed to list shares of a remote peer")]
 pub enum ListPeerSharesError {
-    Io(FramedError),
+    Io(NoiseStreamError),
     ProtocolError(ProtocolError),
 }
 
 #[derive(Debug, Display, Error, From, IsVariant)]
 #[display("Failed connect to a remote share")]
 pub enum ConnectToRemoteShareError {
-    Io(FramedError),
+    Io(NoiseStreamError),
     ShareDoesntExist(ShareDoesntExistError),
     #[display("Tried to connect to the same share for the second time")]
     RepeatedRemoteShare(RepeatedRemoteShareError),
@@ -427,6 +428,6 @@ impl From<NewPeerConnectedToShareError> for ConnectToRemoteShareError {
 
 impl From<io::Error> for ConnectToRemoteShareError {
     fn from(value: io::Error) -> Self {
-        Self::Io(FramedError::Io(value))
+        Self::Io(NoiseStreamError::Io(value))
     }
 }

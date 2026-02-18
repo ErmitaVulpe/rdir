@@ -18,9 +18,11 @@ derive_more = { version = "2.1.1", features = ["full"] }
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
 lz4 = "1.28.1"
 nix = { version = "0.31.1", features = ["fs", "process"] }
+pin-project = "1.1.10"
 smol = "2.0.2"
 smol-timeout = "0.6.1"
 snow = "0.10.0"
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "local-time", "registry", "std"] }
+yamux = "0.13.8"

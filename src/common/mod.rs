@@ -8,7 +8,7 @@ use crate::{
     common::shares::{CommonShareName, CommonShareNameParseError, RemotePeerAddr, ShareName},
     server::{
         ConnectToRemoteShareError, ProtocolError,
-        net::FramedError,
+        net::NoiseStreamError,
         state::{
             PeerId, RemoteShare, RepeatedPeerError, RepeatedRemoteShareError, RepeatedShare, Share,
             ShareDoesntExistError,
@@ -245,7 +245,7 @@ pub enum ServerError {
     CommonShareNameParse(CommonShareNameParseError),
     ConnectToRemoteShare(ConnectToRemoteShareError),
     InvalidShareName,
-    PeerIo(FramedError),
+    PeerIo(NoiseStreamError),
     RepeatedShare(RepeatedShare),
     ShareDoesntExit(ShareDoesntExistError),
 }
@@ -284,11 +284,11 @@ pub enum FramedErrorDto {
     Io(#[error(ignore)] String),
 }
 
-impl From<FramedError> for FramedErrorDto {
-    fn from(value: FramedError) -> Self {
+impl From<NoiseStreamError> for FramedErrorDto {
+    fn from(value: NoiseStreamError) -> Self {
         match value {
-            FramedError::Io(err) => Self::Io(anyhow::Error::from(err).to_string()),
-            FramedError::Crypto(err) => Self::Crypto(anyhow::Error::from(err).to_string()),
+            NoiseStreamError::Io(err) => Self::Io(anyhow::Error::from(err).to_string()),
+            NoiseStreamError::Crypto(err) => Self::Crypto(anyhow::Error::from(err).to_string()),
         }
     }
 }
