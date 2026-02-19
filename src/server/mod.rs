@@ -40,7 +40,7 @@ use crate::{
     },
     server::{
         messages::{PeerInitConnectToShareResponse, PeerInitListSharesRosponse, PeerInitMessage},
-        net::{NoiseStream, NoiseStreamError, accept_from_peer},
+        net::{NoiseStream, NoiseStreamError},
         state::{
             NewPeerConnectedToShareError, Peer, PeerId, RepeatedPeerError,
             RepeatedRemoteShareError, Share, ShareDoesntExistError, State, StateNotification,

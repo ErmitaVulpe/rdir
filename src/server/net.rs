@@ -2,20 +2,29 @@ use std::{
     io::ErrorKind,
     net::{SocketAddr, SocketAddrV4},
     pin::Pin,
+    rc::Rc,
     sync::LazyLock,
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
-use derive_more::{Display, Error, From, IsVariant};
-use futures::ready;
+use bitcode::{Decode, Encode};
+use derive_more::{Constructor, Display, Error, From, IsVariant};
+use futures::{FutureExt, future::poll_fn, ready, select};
 use pin_project::pin_project;
 use smol::{
+    LocalExecutor,
+    channel::{Receiver, Recv, RecvError, Send, SendError, Sender, unbounded},
+    future::FutureExt as _,
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
+    pin,
 };
 use smol_timeout::TimeoutExt;
 use snow::{Builder, HandshakeState, TransportState, params::NoiseParams};
+use tracing::{debug, error};
+
+use crate::{common::shares::CommonShareName, server::Server};
 
 pub const FRAMED_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const FRAMED_TCP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -26,6 +35,137 @@ static PARAMS: LazyLock<NoiseParams> =
 const LENGTH_FIELD_LEN: usize = std::mem::size_of::<u16>();
 const TAG_LEN: usize = 16;
 const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
+
+pub struct PeerConnection2 {
+    command_tx: Sender<ConnectionCommand>,
+    pub peer_closed: Receiver<()>,
+    stream_rx: Receiver<NewStream>,
+}
+
+impl PeerConnection2 {
+    pub async fn connect(
+        ex: &LocalExecutor<'_>,
+        addr: SocketAddrV4,
+    ) -> Result<Self, NoiseStreamError> {
+        let noise_stream = async {
+            let stream = TcpStream::connect(addr).await?;
+            let state = Builder::new(PARAMS.clone()).build_initiator()?;
+            NoiseStream::handshake(stream, state).await
+        }
+        .timeout(FRAMED_TCP_CONNECT_TIMEOUT)
+        .await
+        .ok_or(io::Error::from(io::ErrorKind::TimedOut))??;
+
+        let SocketAddr::V4(peer_addr) = noise_stream.get_inner().peer_addr()? else {
+            return Err(io::Error::from(io::ErrorKind::Unsupported).into());
+        };
+        let mut conn =
+            yamux::Connection::new(noise_stream, Default::default(), yamux::Mode::Client);
+        let (command_tx, command_rx) = unbounded();
+        let (stream_tx, stream_rx) = unbounded();
+        let (shutdown_tx, shutdown_rx) = unbounded();
+        poll_fn(move |cx| {
+            let command_fut = command_rx.recv();
+            pin!(command_fut);
+            match command_fut.poll(cx) {
+                Poll::Ready(command) => match command.unwrap_or(ConnectionCommand::Shutdown) {
+                    ConnectionCommand::NewChannel => todo!(),
+                    ConnectionCommand::Shutdown => todo!(),
+                },
+                Poll::Pending => {}
+            }
+
+            match ready!(conn.poll_next_inbound(cx)) {
+                Some(Ok(stream)) => {
+                    let fut = stream_tx.send(NewStream::Inbound(stream));
+                    pin!(fut);
+                    let _ = fut.poll(cx);
+                    Poll::Pending
+                }
+                Some(Err(e)) => {
+                    error!("Error while handling a connection with peer: {e}");
+                    let _ = shutdown_tx.try_send(());
+                    Poll::Ready(())
+                }
+                None => {
+                    let _ = shutdown_tx.try_send(());
+                    Poll::Ready(())
+                }
+            }
+        })
+        .await;
+
+        Ok(Self {
+            command_tx,
+            stream_rx,
+            peer_closed: shutdown_rx,
+        })
+    }
+}
+
+pub enum NewStream {
+    Inbound(yamux::Stream),
+    Outbound(yamux::Stream),
+}
+
+async fn background_handler(
+    server: Rc<Server<'_>>,
+    mut conn: yamux::Connection<NoiseStream<TcpStream>>,
+    command_rx: Receiver<ConnectionCommand>,
+    peer_closed_tx: Sender<()>,
+) {
+    loop {
+        let command = select! {
+            command = command_rx.recv().fuse() => {
+                command.unwrap_or(ConnectionCommand::Shutdown)
+            },
+            new_inbound = poll_fn(|cx| conn.poll_next_inbound(cx)).fuse() => {
+                match new_inbound {
+                    Some(Ok(stream)) => {
+                        server.ex.spawn(handle_new_channel(stream, None)).detach();
+                        continue;
+                    },
+                    Some(Err(err)) => {
+                        error!("IO Error from peer: {err}");
+                        let _ = peer_closed_tx.try_send(());
+                        ConnectionCommand::Shutdown
+                    },
+                    None => {
+                        let _ = peer_closed_tx.try_send(());
+                        ConnectionCommand::Shutdown
+                    },
+                }
+            },
+        };
+
+        match command {
+            ConnectionCommand::NewChannel(ctx) => {
+                // server.ex.spawn(handle_new_channel(stream, None)).detach();
+                poll_fn(|cx| {
+
+                })
+            }
+            ConnectionCommand::Shutdown => {
+                let _ = poll_fn(|cx| conn.poll_close(cx)).await;
+            },
+        }
+    }
+}
+
+pub(super) enum ConnectionCommand {
+    NewChannel(NewChannelCtx),
+    Shutdown,
+}
+
+pub struct NewChannelCtx {
+    share_name: CommonShareName,
+}
+
+async fn handle_new_channel(stream: yamux::Stream, ctx: Option<NewChannelCtx>) {
+    let _ = stream;
+    let _ = ctx;
+    debug!("Created a new stream with client :D");
+}
 
 pub struct PeerConnection {
     inner: yamux::Connection<NoiseStream<TcpStream>>,
@@ -67,10 +207,6 @@ impl PeerConnection {
         .await
         .ok_or(io::Error::from(io::ErrorKind::TimedOut))?
     }
-
-    pub async fn new_outbound(&mut self) -> yamux::Result<yamux::Stream> {
-        
-    }
 }
 
 #[derive(Debug)]
@@ -108,22 +244,6 @@ pub struct NoiseStream<T> {
 impl<T> NoiseStream<T> {
     pub fn get_inner(&self) -> &T {
         &self.inner
-    }
-
-    pub fn get_inner_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-
-    pub fn get_state(&self) -> &TransportState {
-        &self.transport
-    }
-
-    pub fn get_state_mut(&mut self) -> &mut TransportState {
-        &mut self.transport
     }
 }
 

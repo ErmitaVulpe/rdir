@@ -15,7 +15,7 @@ backoff = "0.4.0"
 bitcode = "0.6.9"
 clap = { version = "4.5.57", features = ["derive", "env"] }
 derive_more = { version = "2.1.1", features = ["full"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
+futures = { version = "0.3.31", default-features = false, features = ["async-await", "std"] }
 lz4 = "1.28.1"
 nix = { version = "0.31.1", features = ["fs", "process"] }
 pin-project = "1.1.10"
