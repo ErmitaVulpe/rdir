@@ -39,12 +39,10 @@ use crate::{
         shares::{FullShareName, ShareName},
     },
     server::{
-        messages::{PeerInitConnectToShareResponse, PeerInitListSharesRosponse, PeerInitMessage},
-        net::{NoiseStream, NoiseStreamError},
-        state::{
+        messages::{PeerInitConnectToShareResponse, PeerInitListSharesRosponse, PeerInitMessage}, net::NoiseStreamError, state::{
             NewPeerConnectedToShareError, Peer, PeerId, RepeatedPeerError,
             RepeatedRemoteShareError, Share, ShareDoesntExistError, State, StateNotification,
-        },
+        }
     },
 };
 
@@ -222,50 +220,51 @@ impl Server<'_> {
     async fn handle_peer(self: Rc<Self>, stream: TcpStream) {
         let value = async {
             debug!("Entered `handle_peer`");
-            let mut stream = accept_from_peer(stream).await?;
-            stream.open_stream(cx);
-            let buf = stream.read_timeout().await?;
-            let message: PeerInitMessage = decode(&buf)?;
-            debug!("Peer sent a message: {message:?}");
-
-            match message {
-                PeerInitMessage::ConnectToShare { name } => {
-                    let SocketAddr::V4(address) = stream.peer_addr()? else {
-                        bail!("IPv6 is unsupported");
-                    };
-                    let (shutdown_tx, shutdown_rx) = bounded(1);
-                    let (notification_tx, notification_rx) = unbounded();
-                    let peer = Peer::new(address, shutdown_tx, notification_tx);
-                    let result = self
-                        .state
-                        .borrow_mut()
-                        .new_peer_connected_to_share(peer, name);
-                    match result {
-                        Ok(peer_id) => {
-                            let buf = encode(&PeerInitConnectToShareResponse::Ok);
-                            stream.write(&buf).await?;
-                            self.long_lived_peer_connection(peer_id, shutdown_rx, notification_rx)
-                                .await?;
-                        }
-                        Err(err) => {
-                            let buf = encode(&PeerInitConnectToShareResponse::Err(err));
-                            stream.write(&buf).await?;
-                        }
-                    }
-                }
-                PeerInitMessage::ListShares => {
-                    let shares = self
-                        .state
-                        .borrow()
-                        .get_shares()
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let resp = PeerInitListSharesRosponse { shares };
-                    let buf = encode(&resp);
-                    stream.write(&buf).await?;
-                }
-            }
+            todo!();
+            // let mut stream = accept_from_peer(stream).await?;
+            // stream.open_stream(cx);
+            // let buf = stream.read_timeout().await?;
+            // let message: PeerInitMessage = decode(&buf)?;
+            // debug!("Peer sent a message: {message:?}");
+            //
+            // match message {
+            //     PeerInitMessage::ConnectToShare { name } => {
+            //         let SocketAddr::V4(address) = stream.peer_addr()? else {
+            //             bail!("IPv6 is unsupported");
+            //         };
+            //         let (shutdown_tx, shutdown_rx) = bounded(1);
+            //         let (notification_tx, notification_rx) = unbounded();
+            //         let peer = Peer::new(address, shutdown_tx, notification_tx);
+            //         let result = self
+            //             .state
+            //             .borrow_mut()
+            //             .new_peer_connected_to_share(peer, name);
+            //         match result {
+            //             Ok(peer_id) => {
+            //                 let buf = encode(&PeerInitConnectToShareResponse::Ok);
+            //                 stream.write(&buf).await?;
+            //                 self.long_lived_peer_connection(peer_id, shutdown_rx, notification_rx)
+            //                     .await?;
+            //             }
+            //             Err(err) => {
+            //                 let buf = encode(&PeerInitConnectToShareResponse::Err(err));
+            //                 stream.write(&buf).await?;
+            //             }
+            //         }
+            //     }
+            //     PeerInitMessage::ListShares => {
+            //         let shares = self
+            //             .state
+            //             .borrow()
+            //             .get_shares()
+            //             .keys()
+            //             .cloned()
+            //             .collect::<Vec<_>>();
+            //         let resp = PeerInitListSharesRosponse { shares };
+            //         let buf = encode(&resp);
+            //         stream.write(&buf).await?;
+            //     }
+            // }
 
             anyhow::Ok(())
         }
@@ -281,44 +280,46 @@ impl Server<'_> {
         share_name: FullShareName,
         mount_path: PathBuf,
     ) -> Result<(), ConnectToRemoteShareError> {
-        let mut stream = NoiseStream::new_initiator((&share_name.addr).into()).await?;
-        stream
-            .write(&encode(&PeerInitMessage::ConnectToShare {
-                name: share_name.name.clone(),
-            }))
-            .await?;
-        let resp: PeerInitConnectToShareResponse =
-            decode(&stream.read_timeout().await?).map_err(|_| ProtocolError)?;
-        if let PeerInitConnectToShareResponse::Err(err) = resp {
-            return Err(err.into());
-        }
-
-        let SocketAddr::V4(address) = stream.peer_addr()? else {
-            panic!("IPv6 is unsupported");
-        };
-        let (shutdown_tx, shutdown_rx) = bounded(1);
-        let (notification_tx, notification_rx) = unbounded();
-        let peer = Peer::new(address, shutdown_tx, notification_tx);
-        let peer_id = self
-            .state
-            .borrow_mut()
-            .join_remote_share_new(peer, share_name, mount_path)?;
-        let fut = self
-            .clone()
-            .long_lived_peer_connection(peer_id, shutdown_rx, notification_rx);
-        self.ex.spawn(fut).detach();
-        Ok(())
+        todo!()
+        // let mut stream = NoiseStream::new_initiator((&share_name.addr).into()).await?;
+        // stream
+        //     .write(&encode(&PeerInitMessage::ConnectToShare {
+        //         name: share_name.name.clone(),
+        //     }))
+        //     .await?;
+        // let resp: PeerInitConnectToShareResponse =
+        //     decode(&stream.read_timeout().await?).map_err(|_| ProtocolError)?;
+        // if let PeerInitConnectToShareResponse::Err(err) = resp {
+        //     return Err(err.into());
+        // }
+        //
+        // let SocketAddr::V4(address) = stream.peer_addr()? else {
+        //     panic!("IPv6 is unsupported");
+        // };
+        // let (shutdown_tx, shutdown_rx) = bounded(1);
+        // let (notification_tx, notification_rx) = unbounded();
+        // let peer = Peer::new(address, shutdown_tx, notification_tx);
+        // let peer_id = self
+        //     .state
+        //     .borrow_mut()
+        //     .join_remote_share_new(peer, share_name, mount_path)?;
+        // let fut = self
+        //     .clone()
+        //     .long_lived_peer_connection(peer_id, shutdown_rx, notification_rx);
+        // self.ex.spawn(fut).detach();
+        // Ok(())
     }
 
     async fn list_peer_shares(
         self: Rc<Self>,
         addr: SocketAddrV4,
     ) -> Result<PeerInitListSharesRosponse, ListPeerSharesError> {
-        let mut stream = NoiseStream::new_initiator(addr).await?;
-        stream.write(&encode(&PeerInitMessage::ListShares)).await?;
-        let resp: PeerInitListSharesRosponse =
-            decode(&stream.read().await?).map_err(|_| ProtocolError)?;
-        Ok(resp)
+        todo!()
+        // let mut stream = NoiseStream::new_initiator(addr).await?;
+        // stream.write(&encode(&PeerInitMessage::ListShares)).await?;
+        // let resp: PeerInitListSharesRosponse =
+        //     decode(&stream.read().await?).map_err(|_| ProtocolError)?;
+        // Ok(resp)
     }
 
     async fn long_lived_peer_connection(
