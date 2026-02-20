@@ -10,6 +10,7 @@ strip = true
 
 [dependencies]
 anyhow = "1.0.101"
+backoff = "0.4.0"
 bitcode = "0.6.9"
 clap = { version = "4.5.57", features = ["derive", "env"] }
 derive_more = { version = "2.1.1", features = ["full"] }
@@ -17,7 +18,9 @@ futures = { version = "0.3.31", default-features = false, features = ["async-awa
 libp2p = { version = "0.56.0", features = ["tcp", "noise", "yamux", "macros", "tokio", "full"] }
 libp2p-stream = "0.4.0-alpha"
 lz4 = "1.28.1"
+nix = { version = "0.31.1", features = ["fs", "process", "user"] }
 tokio = { version = "1.49.0", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["codec"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "local-time", "registry", "std"] }

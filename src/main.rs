@@ -17,6 +17,8 @@ mod server;
 
 fn main() -> AnyResult<()> {
     let args = args::Args::parse();
+    // Set a restrictive file creation mask
+    unsafe { nix::libc::umask(0o077) };
 
     let sock_path = args.tmp_dir.join(SOCKET_NAME);
     let mut is_client = true;
@@ -43,7 +45,7 @@ fn main() -> AnyResult<()> {
 
     match is_client {
         true => client::Client::run(args, maybe_sock),
-        false => server::Server::run(args, maybe_listener.unwrap()),
+        false => server::run(args, maybe_listener.unwrap()),
     }
 }
 

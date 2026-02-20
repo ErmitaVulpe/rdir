@@ -2,7 +2,7 @@ use std::{fs::canonicalize, net::SocketAddrV4, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
-use smol::io;
+use tokio::io;
 
 use crate::common::shares::{CommonShareName, ShareName};
 
@@ -122,7 +122,7 @@ fn tmpdir_parser(s: &str) -> Result<PathBuf, &'static str> {
     if path.is_relative() {
         return Err("Value of tmpdir has to be an absolute path");
     }
-    path.push("rdir");
+    path.push(format!("rdir-{}", nix::unistd::Uid::current()));
     Ok(path)
 }
 
