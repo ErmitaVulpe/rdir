@@ -19,7 +19,7 @@ libp2p = { version = "0.56.0", features = ["tcp", "noise", "yamux", "macros", "t
 libp2p-stream = "0.4.0-alpha"
 lz4 = "1.28.1"
 nix = { version = "0.31.1", features = ["fs", "process", "user"] }
-tokio = { version = "1.49.0", features = ["full"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "net", "signal"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
 tracing = { version = "0.1.44", features = ["release_max_level_info"] }
 tracing-appender = "0.2.4"

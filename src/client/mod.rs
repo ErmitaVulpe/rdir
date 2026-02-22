@@ -22,8 +22,9 @@ impl Client {
     }
 
     async fn main(args: Args, maybe_sock: Option<std::os::unix::net::UnixStream>) -> AnyResult<()> {
-        let stream = match (maybe_sock, args.expects_active_server()) {
+        let stream = match (maybe_sock, args.should_server_start()) {
             (Some(val), _) => {
+                val.set_nonblocking(true)?;
                 UnixStream::from_std(val).context("Failed to register the IPC socket as async")?
             },
             (None, false) => {

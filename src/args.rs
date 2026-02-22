@@ -32,9 +32,13 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn expects_active_server(&self) -> bool {
+    pub fn should_server_start(&self) -> bool {
         match &self.command {
-            Command::Connect { .. } | Command::Discover => true,
+            Command::Connect { command } => match command {
+                ConnectCommand::Ls => false,
+                ConnectCommand::Mount { .. } | ConnectCommand::Unmount { .. } => true,
+            },
+            Command::Discover => true,
             Command::Share { command } => match command {
                 ShareCommand::Remove { .. } | ShareCommand::Share { .. } => true,
                 ShareCommand::Ls => false,

@@ -25,10 +25,7 @@ impl IpcStream<Client> {
         }
     }
 
-    pub async fn send_command(
-        &mut self,
-        command: &ClientMessage,
-    ) -> Result<ServerResponse, io::Error> {
+    pub async fn send_command(&mut self, command: &ClientMessage) -> io::Result<ServerResponse> {
         let encoded = encode(command);
         self.inner.send(encoded.into()).await?;
         let received = self
@@ -46,6 +43,20 @@ impl IpcStream<Server> {
             inner: length_delimited(stream),
             _marker: PhantomData,
         }
+    }
+
+    pub async fn read_command(&mut self) -> io::Result<ClientMessage> {
+        let received = self
+            .inner
+            .next()
+            .await
+            .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))??;
+        decode(&received).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    pub async fn write_respone(&mut self, response: &ServerResponse) -> io::Result<()> {
+        let encoded = encode(response);
+        self.inner.send(encoded.into()).await
     }
 }
 

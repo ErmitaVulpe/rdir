@@ -2,21 +2,24 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     net::SocketAddrV4,
     path::PathBuf,
+    sync::Arc,
 };
 
 use bitcode::{Decode, Encode};
 use derive_more::{Display, Eq, From, IsVariant, PartialEq};
 use libp2p::PeerId;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
-    PeersDto, RemoteSharesDto, ShareDto, SharesDto,
-    shares::{CommonShareName, FullShareName, RemotePeerAddr},
+    PeerIdDto, PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
+    shares::{CommonShareName, FullShareName},
 };
 
 pub mod error;
 use error::*;
+
+pub type SharedState = Arc<RwLock<State>>;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -46,36 +49,33 @@ impl State {
     }
 
     pub fn peers_dto(&self) -> PeersDto {
-        todo!()
-        // let mut data = BTreeMap::new();
-        // for (peer_name, peer) in &self.peers {
-        //     data.insert(*peer_name, peer.address);
-        // }
-        //
-        // PeersDto(data)
+        let mut data = BTreeMap::new();
+        for (peer_id, peer) in &self.peers {
+            data.insert(PeerIdDto::from(peer_id.clone()), peer.address);
+        }
+
+        PeersDto(data)
     }
 
     pub fn remote_shares_dto(&self) -> RemoteSharesDto {
-        todo!()
-        // let mut data = BTreeMap::new();
-        // for (remote_share_name, remote_share) in &self.remote_shares {
-        //     let entry = data.entry(remote_share_name.addr.clone());
-        //     match entry {
-        //         Entry::Vacant(entry) => {
-        //             entry.insert(vec![RemoteShareDto::from(remote_share)]);
-        //         }
-        //         Entry::Occupied(mut entry) => {
-        //             entry.get_mut().push(RemoteShareDto::from(remote_share));
-        //         }
-        //     }
-        // }
-        //
-        // RemoteSharesDto(data)
+        let mut data = BTreeMap::new();
+        for (remote_share_name, remote_share) in &self.remote_shares {
+            let entry = data.entry(remote_share_name.addr.clone());
+            match entry {
+                Entry::Vacant(entry) => {
+                    entry.insert(vec![RemoteShareDto::from(remote_share)]);
+                }
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().push(RemoteShareDto::from(remote_share));
+                }
+            }
+        }
+
+        RemoteSharesDto(data)
     }
 
     pub fn shares_dto(&self) -> SharesDto {
-        todo!()
-        // SharesDto(self.shares.values().map(ShareDto::from).collect())
+        SharesDto(self.shares.values().map(ShareDto::from).collect())
     }
 
     pub fn new_peer_connected_to_share(

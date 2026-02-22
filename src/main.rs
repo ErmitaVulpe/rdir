@@ -24,7 +24,7 @@ fn main() -> AnyResult<()> {
     let mut is_client = true;
     let maybe_sock = try_connect(&sock_path);
     let mut maybe_listener = None;
-    if args.expects_active_server() && maybe_sock.is_none() {
+    if args.should_server_start() && maybe_sock.is_none() {
         let _ = fs::create_dir(&args.tmp_dir);
         let listener = UnixListener::bind(&sock_path).context(format!(
             "Failed to create a unix socket at: {}",
@@ -45,7 +45,13 @@ fn main() -> AnyResult<()> {
 
     match is_client {
         true => client::Client::run(args, maybe_sock),
-        false => server::run(args, maybe_listener.unwrap()),
+        false => {
+            let result = server::run(args, maybe_listener.unwrap());
+            if let Err(err) = &result {
+                tracing::error!("{err}");
+            }
+            result
+        }
     }
 }
 
