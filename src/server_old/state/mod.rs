@@ -371,10 +371,6 @@ pub enum ExitPeerShareError {
     NoSuchConnectionError(NoSuchRemoteShareError),
 }
 
-#[must_use]
-#[derive(Encode, Decode, Clone, Copy, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerId(u32);
-
 #[derive(Clone, Debug)]
 pub struct Peer {
     pub address: SocketAddrV4,

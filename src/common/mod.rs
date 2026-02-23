@@ -6,10 +6,13 @@ use libp2p::PeerId;
 
 use crate::{
     args::{Args, ConnectCommand, ShareCommand},
-    common::shares::{CommonShareName, RemotePeerAddr, ShareName},
+    common::shares::{CommonShareName, CommonShareNameParseError, RemotePeerAddr, ShareName},
     server::{
         ServerError,
-        state::{RemoteShare, Share},
+        state::{
+            RemoteShare, Share,
+            error::{RepeatedShare, ShareDoesntExistError},
+        },
     },
 };
 
@@ -239,25 +242,31 @@ impl fmt::Display for SharesDto {
 
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
 pub enum ServerErrorDto {
-    // #[display("Specified share name is invalid")]
-    // CommonShareNameParse(CommonShareNameParseError),
+    #[display("Specified share name is invalid")]
+    CommonShareNameParse(CommonShareNameParseError),
     // ConnectToRemoteShare(ConnectToRemoteShareErrorDto),
     InvalidShareName,
     // #[display("Error while communicating with a peer")]
     // PeerIo(FramedErrorDto),
-    // RepeatedShare(#[error(ignore)] RepeatedShare),
-    // ShareDoesntExit(#[error(ignore)] ShareDoesntExistError),
+    RepeatedShare(#[error(ignore)] RepeatedShare),
+    ShareDoesntExit(#[error(ignore)] ShareDoesntExistError),
+    #[display("Path needs to be absolute")]
+    RelativePath,
+    #[display("Path needs to point to a directory")]
+    PathNotDir,
 }
 
 impl From<ServerError> for ServerErrorDto {
     fn from(value: ServerError) -> Self {
         match value {
-            // ServerError::CommonShareNameParse(err) => Self::CommonShareNameParse(err),
+            ServerError::CommonShareNameParse(err) => Self::CommonShareNameParse(err),
             // ServerError::ConnectToRemoteShare(err) => Self::ConnectToRemoteShare(err.into()),
             ServerError::InvalidShareName => Self::InvalidShareName,
             // ServerError::PeerIo(err) => Self::PeerIo(err.into()),
-            // ServerError::RepeatedShare(err) => Self::RepeatedShare(err),
-            // ServerError::ShareDoesntExit(err) => Self::ShareDoesntExit(err),
+            ServerError::RepeatedShare(err) => Self::RepeatedShare(err),
+            ServerError::ShareDoesntExit(err) => Self::ShareDoesntExit(err),
+            ServerError::RelativePath => Self::RelativePath,
+            ServerError::PathNotDir => Self::PathNotDir,
         }
     }
 }

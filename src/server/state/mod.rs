@@ -23,7 +23,6 @@ pub type SharedState = Arc<RwLock<State>>;
 
 #[derive(Debug, Default)]
 pub struct State {
-    next_peer_id: u32,
     peers: BTreeMap<PeerId, Peer>,
     peers_by_socket: BTreeMap<SocketAddrV4, PeerId>,
     remote_shares: BTreeMap<FullShareName, RemoteShare>,
@@ -32,26 +31,10 @@ pub struct State {
 }
 
 impl State {
-    pub fn get_peers(&self) -> &BTreeMap<PeerId, Peer> {
-        &self.peers
-    }
-
-    pub fn get_peers_by_scoket(&self) -> &BTreeMap<SocketAddrV4, PeerId> {
-        &self.peers_by_socket
-    }
-
-    pub fn get_shares(&self) -> &BTreeMap<CommonShareName, Share> {
-        &self.shares
-    }
-
-    pub fn get_remote_shares(&self) -> &BTreeMap<FullShareName, RemoteShare> {
-        &self.remote_shares
-    }
-
     pub fn peers_dto(&self) -> PeersDto {
         let mut data = BTreeMap::new();
         for (peer_id, peer) in &self.peers {
-            data.insert(PeerIdDto::from(peer_id.clone()), peer.address);
+            data.insert(PeerIdDto::from(*peer_id), peer.address);
         }
 
         PeersDto(data)

@@ -5,7 +5,6 @@ use std::{
 };
 
 use derive_more::{Display, Error, From, IsVariant};
-use futures::StreamExt;
 use libp2p::{Multiaddr, StreamProtocol, multiaddr, noise, tcp, yamux};
 use libp2p_stream::Control;
 use tokio::{
@@ -13,16 +12,29 @@ use tokio::{
     select,
     signal::unix::{SignalKind, signal},
     spawn,
-    sync::RwLock,
+    sync::{RwLock, mpsc},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{args::Args, server::state::State};
+use crate::{
+    args::Args,
+    common::shares::CommonShareNameParseError,
+    server::{
+        peer::accept_peers,
+        state::{
+            SharedState, State,
+            error::{RepeatedShare, ShareDoesntExistError},
+        },
+        swarm::SwarmCommand,
+    },
+};
 
 mod ipc;
+mod peer;
 mod setup;
 pub mod state;
+mod swarm;
 
 pub const PROTOCOL_ADDR: StreamProtocol = StreamProtocol::new("/rdir/1.0");
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
@@ -49,8 +61,6 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
 }
 
 async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> anyhow::Result<()> {
-    let state = Arc::new(RwLock::new(State::default()));
-
     // TEMP new_identity
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -65,28 +75,26 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     let socket_addr = args
         .tcp_socket
         .unwrap_or(SocketAddrV4::new([0; 4].into(), NETWORK_PORT));
-    let tcp_multiaddr =
-        Multiaddr::from(*socket_addr.ip()).with(multiaddr::Protocol::Tcp(socket_addr.port()));
-    swarm.listen_on(tcp_multiaddr)?;
+    swarm.listen_on(multiaddr_from_sock(&socket_addr))?;
 
+    let state = Arc::new(RwLock::new(State::default()));
     let control = swarm.behaviour().new_control();
+    let (swarm_command_tx, swarm_commamd_rx) = mpsc::channel(16);
+    let server_ctx = ServerCtx {
+        state,
+        control,
+        swarm_command_tx,
+    };
 
     std_listener.set_nonblocking(true)?;
     let unix_listener = UnixListener::from_std(std_listener)?;
-    let ipc_fut = ipc::accpet_client(unix_listener, state);
+    let ipc_fut = ipc::accpet_client(unix_listener, server_ctx.clone());
     spawn(SERVER_CANCEL.run_until_cancelled(ipc_fut));
-    let peer_fut = accept_peers(control.clone());
-    spawn(SERVER_CANCEL.run_until_cancelled(peer_fut));
+    spawn(SERVER_CANCEL.run_until_cancelled(accept_peers(server_ctx)));
+    spawn(swarm::drive_swarm(swarm, swarm_commamd_rx));
 
     await_shutdown().await;
     Ok(())
-}
-
-async fn accept_peers(mut control: Control) {
-    let mut incoming = control.accept(PROTOCOL_ADDR).unwrap();
-    while let Some((peer, stream)) = incoming.next().await {
-        todo!();
-    }
 }
 
 async fn await_shutdown() {
@@ -110,14 +118,29 @@ async fn await_shutdown() {
     info!("Shutting down");
 }
 
+fn multiaddr_from_sock(socket: &SocketAddrV4) -> Multiaddr {
+    Multiaddr::from(*socket.ip()).with(multiaddr::Protocol::Tcp(socket.port()))
+}
+
+#[derive(Clone)]
+struct ServerCtx {
+    control: Control,
+    state: SharedState,
+    swarm_command_tx: mpsc::Sender<SwarmCommand>,
+}
+
 #[derive(Debug, Display, Error, From, IsVariant)]
 #[display("Server encountered an error while processing the command")]
 pub enum ServerError {
-    // #[display("Specified share name is invalid")]
-    // CommonShareNameParse(CommonShareNameParseError),
+    #[display("Specified share name is invalid")]
+    CommonShareNameParse(CommonShareNameParseError),
     // ConnectToRemoteShare(ConnectToRemoteShareError),
     InvalidShareName,
     // PeerIo(NoiseStreamError),
-    // RepeatedShare(RepeatedShare),
-    // ShareDoesntExit(ShareDoesntExistError),
+    RepeatedShare(RepeatedShare),
+    ShareDoesntExit(ShareDoesntExistError),
+    #[display("Path needs to be absolute")]
+    RelativePath,
+    #[display("Path needs to point to a directory")]
+    PathNotDir,
 }
