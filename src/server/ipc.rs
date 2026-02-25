@@ -101,9 +101,6 @@ async fn mount_share(
     path: String,
     ctx: &ServerCtx,
 ) -> Result<ServerResponse, ServerError> {
-    match ctx.state. {
-        
-    }
     todo!()
 }
 
