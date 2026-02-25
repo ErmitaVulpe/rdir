@@ -24,7 +24,7 @@ use crate::{
         peer::accept_peers,
         state::{
             SharedState, State,
-            error::{RepeatedShare, ShareDoesntExistError},
+            error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
         },
         swarm::SwarmCommand,
     },
@@ -81,7 +81,7 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     let control = swarm.behaviour().new_control();
     let (swarm_command_tx, swarm_commamd_rx) = mpsc::channel(16);
     let server_ctx = ServerCtx {
-        state,
+        state: state.clone(),
         control,
         swarm_command_tx,
     };
@@ -91,7 +91,7 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     let ipc_fut = ipc::accpet_client(unix_listener, server_ctx.clone());
     spawn(SERVER_CANCEL.run_until_cancelled(ipc_fut));
     spawn(SERVER_CANCEL.run_until_cancelled(accept_peers(server_ctx)));
-    spawn(swarm::drive_swarm(swarm, swarm_commamd_rx));
+    spawn(swarm::drive_swarm(swarm, state, swarm_commamd_rx));
 
     await_shutdown().await;
     Ok(())
@@ -134,9 +134,8 @@ struct ServerCtx {
 pub enum ServerError {
     #[display("Specified share name is invalid")]
     CommonShareNameParse(CommonShareNameParseError),
-    // ConnectToRemoteShare(ConnectToRemoteShareError),
+    ExitPeerShare(ExitPeerShareError),
     InvalidShareName,
-    // PeerIo(NoiseStreamError),
     RepeatedShare(RepeatedShare),
     ShareDoesntExit(ShareDoesntExistError),
     #[display("Path needs to be absolute")]

@@ -5,15 +5,16 @@ use std::{
     sync::Arc,
 };
 
+use bimap::BiBTreeMap;
 use bitcode::{Decode, Encode};
-use derive_more::{Display, Eq, From, IsVariant, PartialEq};
+use derive_more::{Display, Eq, IsVariant, PartialEq};
 use libp2p::PeerId;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
     PeerIdDto, PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
-    shares::{CommonShareName, FullShareName},
+    shares::{CommonShareName, FullShareName, ShareName},
 };
 
 pub mod error;
@@ -24,7 +25,7 @@ pub type SharedState = Arc<RwLock<State>>;
 #[derive(Debug, Default)]
 pub struct State {
     peers: BTreeMap<PeerId, Peer>,
-    peers_by_socket: BTreeMap<SocketAddrV4, PeerId>,
+    peers_by_socket: BiBTreeMap<PeerId, SocketAddrV4>,
     remote_shares: BTreeMap<FullShareName, RemoteShare>,
     shares: BTreeMap<CommonShareName, Share>,
     shutdown_server: CancellationToken,
@@ -61,13 +62,18 @@ impl State {
         SharesDto(self.shares.values().map(ShareDto::from).collect())
     }
 
+    pub fn update_peer_socket(&mut self, peer_id: PeerId, new_socket: SocketAddrV4) {
+        let res = self.peers_by_socket.insert(peer_id, new_socket);
+        debug_assert!(matches!(res, bimap::Overwritten::Left(_, _)));
+    }
+
     pub fn new_peer_connected_to_share(
         &mut self,
         peer_id: PeerId,
         mut peer: Peer,
         share_name: CommonShareName,
     ) -> Result<PeerId, NewPeerConnectedToShareError> {
-        if self.peers_by_socket.contains_key(&peer.address) {
+        if self.peers_by_socket.contains_right(&peer.address) {
             return Err(RepeatedPeerError.into());
         }
 
@@ -78,8 +84,10 @@ impl State {
 
         // all checks passed, now modifying
         peer.used_shares.insert(share_name);
-        let res = self.peers_by_socket.insert(peer.address, peer_id);
-        debug_assert!(res.is_none());
+        let res = self
+            .peers_by_socket
+            .insert_no_overwrite(peer_id, peer.address);
+        debug_assert!(res.is_ok());
         let res = self.peers.insert(peer_id, peer);
         debug_assert!(res.is_none());
         let res = share.participants.insert(peer_id);
@@ -202,10 +210,23 @@ impl State {
             self.try_drop_peer(participant_id);
         }
 
-        self.should_server_close();
+        self.try_close_server();
         Ok(())
     }
 
+    pub fn try_join_remote_share_by_full_name(
+        &mut self,
+        full_share_name: FullShareName,
+        mount_path: PathBuf,
+    ) -> Result<(), ()> {
+        let peer_id = self
+            .peers_by_socket
+            .get_by_right(&full_share_name.addr.into());
+
+        todo!()
+    }
+
+    /*
     pub fn new_peer_join_remote_share(
         &mut self,
         peer_id: PeerId,
@@ -262,24 +283,44 @@ impl State {
         debug_assert!(res);
         Ok(())
     }
+    */
 
     pub fn exit_remote_share(
         &mut self,
-        peer_id: PeerId,
-        remote_share_name: FullShareName,
+        remote_share_name: ShareName,
     ) -> Result<(), ExitPeerShareError> {
-        let peer = self.peers.get_mut(&peer_id).unwrap();
-        if !peer.used_remote_shares.remove(&remote_share_name) {
-            return Err(NoSuchRemoteShareError.into());
-        }
+        let (remote_share_name, remote_share) = match remote_share_name {
+            ShareName::Common(common_share_name) => {
+                // lookup is O(n), could search by just a range since this is BTree
+                let mut iter = self
+                    .remote_shares
+                    .iter()
+                    .filter(|(k, _)| k.name == common_share_name);
+                let peer_entry = iter.next().ok_or(NoSuchRemoteShareError)?;
+                if iter.next().is_some() {
+                    return Err(RemoteShareNameAmbiguousError.into());
+                }
+                self.remote_shares
+                    .remove_entry(&peer_entry.0.clone())
+                    .unwrap()
+            }
+            ShareName::Full(full_share_name) => self
+                .remote_shares
+                .remove_entry(&full_share_name)
+                .ok_or(NoSuchRemoteShareError)?,
+        };
 
-        let _remote_share = self.remote_shares.remove(&remote_share_name).unwrap();
+        let peer_id = remote_share.owner;
+        let peer = self.peers.get_mut(&peer_id).unwrap();
+        let res = peer.used_remote_shares.remove(&remote_share_name.name);
+        debug_assert!(res);
         self.try_drop_peer(peer_id);
-        self.should_server_close();
+        self.try_close_server();
         Ok(())
     }
 
-    pub fn should_server_close(&self) {
+    /// Sends a global shutdown signal if server has no peers and no shares
+    pub fn try_close_server(&self) {
         if self.peers.is_empty() && self.shares.is_empty() {
             self.shutdown_server.cancel();
         }
@@ -291,7 +332,11 @@ pub struct Peer {
     pub address: SocketAddrV4,
     kill_peer: CancellationToken,
     notification_tx: mpsc::UnboundedSender<StateNotification>,
-    used_remote_shares: BTreeSet<FullShareName>,
+    /// All the shares that the peer has
+    shares: BTreeSet<CommonShareName>,
+    /// Shares of the peer that we are using
+    used_remote_shares: BTreeSet<CommonShareName>,
+    /// Our shares that the peer is using
     used_shares: BTreeSet<CommonShareName>,
 }
 
@@ -305,6 +350,7 @@ impl Peer {
             address,
             kill_peer,
             notification_tx,
+            shares: Default::default(),
             used_remote_shares: Default::default(),
             used_shares: Default::default(),
         }
@@ -335,7 +381,9 @@ pub struct RemoteShare {
     pub mount_path: PathBuf,
 }
 
-#[derive(Encode, Decode, Clone, Debug, Display, From, IsVariant, PartialEq, Eq)]
+/// Notification sent from the State to the peer handler
+#[derive(Encode, Decode, Clone, Debug, Display, IsVariant, PartialEq, Eq)]
 pub enum StateNotification {
+    JoinShare(CommonShareName),
     KickedFromShare(CommonShareName),
 }

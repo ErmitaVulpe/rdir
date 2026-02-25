@@ -37,7 +37,7 @@ impl Client {
         };
         let mut ipc_stream = IpcStream::new_client(stream);
         let resp = ipc_stream.send_command(&ClientMessage::from(&args)).await?;
-        println!("{resp}");
+        print!("{resp}");
         Ok(())
     }
 }

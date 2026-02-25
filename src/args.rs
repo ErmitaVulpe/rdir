@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
 use tokio::io;
 
-use crate::common::shares::{CommonShareName, ShareName};
+use crate::common::shares::{CommonShareName, FullShareName, ShareName};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -81,9 +81,12 @@ pub enum ConnectCommand {
     /// Mount a new remote share
     #[command(short_flag = 'm', alias = "m")]
     Mount {
-        /// Name of the remote share. If address is omitted, tries to search the local network
+        /// Name of the remote share
+        ///
+        /// Specified as: ipv4/example
+        /// or with port: ipv4:port/example
         #[arg()]
-        name: ShareName,
+        name: FullShareName,
         /// Path to a dir to mount the share
         #[arg(value_hint=ValueHint::DirPath, value_parser=existing_path_parser)]
         path: PathBuf,

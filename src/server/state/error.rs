@@ -25,6 +25,10 @@ pub struct RepeatedRemoteShareError;
 #[display("Specified remote share doesnt exist")]
 pub struct NoSuchRemoteShareError;
 
+#[derive(Encode, Decode, Clone, Debug, Display, Error, PartialEq, Eq)]
+#[display("Remote share name ambiguous")]
+pub struct RemoteShareNameAmbiguousError;
+
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
 #[display("New peer failed to connect to a share")]
 pub enum NewPeerConnectedToShareError {
@@ -60,5 +64,6 @@ pub struct RepeatedShare;
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
 #[display("Failed to disconnect from a remote share")]
 pub enum ExitPeerShareError {
-    NoSuchConnectionError(NoSuchRemoteShareError),
+    NoSuchRemoteShareError(NoSuchRemoteShareError),
+    RemoteShareNameAmbiguous(RemoteShareNameAmbiguousError),
 }

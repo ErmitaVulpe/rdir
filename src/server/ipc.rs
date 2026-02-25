@@ -7,7 +7,11 @@ use tokio::{
 use tracing::{debug, error};
 
 use crate::{
-    common::{ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream},
+    common::{
+        ClientMessage, ConnectMessage, ServerResponse, ShareMessage,
+        ipc::IpcStream,
+        shares::{FullShareName, ShareName},
+    },
     server::{SERVER_CANCEL, ServerCtx, ServerError, state::Share},
 };
 
@@ -40,10 +44,9 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
                     let shares = ctx.state.read().await.remote_shares_dto();
                     Ok(ServerResponse::LsMountedShares(shares))
                 }
-                ConnectMessage::Mount { path, name } => todo!(),
+                ConnectMessage::Mount { path, name } => mount_share(name, path, &ctx).await,
                 ConnectMessage::Unmount { name } => {
-                    // let a = ctx.state.write().await.ex
-                    todo!()
+                    Ok(ctx.state.write().await.exit_remote_share(name).into())
                 }
             },
             ClientMessage::Discover => todo!(),
@@ -69,13 +72,7 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
                     Ok(ctx.state.write().await.remove_share(&name).into())
                 }
                 ShareMessage::Share { path, name } => {
-                    let path = PathBuf::from(path);
-                    if path.is_relative() {
-                        return Err(ServerError::RelativePath);
-                    }
-                    if !path.is_dir() {
-                        return Err(ServerError::PathNotDir);
-                    }
+                    let path = validate_path(path)?;
                     let name = name.unwrap_or(
                         path.file_name()
                             .ok_or(ServerError::PathNotDir)?
@@ -97,4 +94,26 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
         error!("Error while handling local client: {e}");
     }
     let _ = stream.write_respone(&resp).await;
+}
+
+async fn mount_share(
+    name: FullShareName,
+    path: String,
+    ctx: &ServerCtx,
+) -> Result<ServerResponse, ServerError> {
+    match ctx.state. {
+        
+    }
+    todo!()
+}
+
+fn validate_path(path: String) -> Result<PathBuf, ServerError> {
+    let path = PathBuf::from(path);
+    if path.is_relative() {
+        return Err(ServerError::RelativePath);
+    }
+    if !path.is_dir() {
+        return Err(ServerError::PathNotDir);
+    }
+    Ok(path)
 }
