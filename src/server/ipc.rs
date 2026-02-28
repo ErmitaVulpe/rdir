@@ -7,26 +7,25 @@ use tokio::{
 use tracing::{debug, error};
 
 use crate::{
-    common::{
-        ClientMessage, ConnectMessage, ServerResponse, ShareMessage,
-        ipc::IpcStream,
-        shares::{FullShareName, ShareName},
+    common::{ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream, shares::FullShareName},
+    server::{
+        SERVER_CANCEL, ServerError,
+        state::{Share, SharedState},
     },
-    server::{SERVER_CANCEL, ServerCtx, ServerError, state::Share},
 };
 
-pub async fn accpet_client(listener: UnixListener, server_ctx: ServerCtx) {
+pub async fn accpet_client(listener: UnixListener, state: SharedState) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                spawn(handle_client(stream, server_ctx.clone()));
+                spawn(handle_client(stream, state.clone()));
             }
             Err(e) => error!("Error while accepting a local client: {e}"),
         }
     }
 }
 
-async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
+async fn handle_client(stream: UnixStream, state: SharedState) {
     let mut stream = IpcStream::new_server(stream);
     let message = match stream.read_command().await {
         Ok(val) => val,
@@ -41,12 +40,14 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
         match message {
             ClientMessage::Connect(message) => match message {
                 ConnectMessage::Ls => {
-                    let shares = ctx.state.read().await.remote_shares_dto();
+                    let shares = state.read().await.remote_shares_dto();
                     Ok(ServerResponse::LsMountedShares(shares))
                 }
-                ConnectMessage::Mount { path, name } => mount_share(name, path, &ctx).await,
+                ConnectMessage::Mount { path, name } => {
+                    mount_share(validate_path(path)?, name, state).await
+                }
                 ConnectMessage::Unmount { name } => {
-                    Ok(ctx.state.write().await.exit_remote_share(name).into())
+                    Ok(state.write().await.exit_remote_share(name).into())
                 }
             },
             ClientMessage::Discover => todo!(),
@@ -55,7 +56,7 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
                 Ok(ServerResponse::Ok)
             }
             ClientMessage::Ls => {
-                let lock = ctx.state.read().await;
+                let lock = state.read().await;
                 Ok(ServerResponse::Status {
                     peers: lock.peers_dto(),
                     remote_shares: lock.remote_shares_dto(),
@@ -65,12 +66,10 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
             ClientMessage::Ping => Ok(ServerResponse::Ok),
             ClientMessage::Share(message) => match message {
                 ShareMessage::Ls => {
-                    let shares = ctx.state.read().await.shares_dto();
+                    let shares = state.read().await.shares_dto();
                     Ok(ServerResponse::LsShares(shares))
                 }
-                ShareMessage::Remove { name } => {
-                    Ok(ctx.state.write().await.remove_share(&name).into())
-                }
+                ShareMessage::Remove { name } => Ok(state.write().await.remove_share(&name).into()),
                 ShareMessage::Share { path, name } => {
                     let path = validate_path(path)?;
                     let name = name.unwrap_or(
@@ -81,7 +80,7 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
                             .parse()?,
                     );
                     let share = Share::new(name, path);
-                    ctx.state.write().await.create_share(share)?;
+                    state.write().await.create_share(share)?;
                     Ok(ServerResponse::Ok)
                 }
             },
@@ -96,12 +95,13 @@ async fn handle_client(stream: UnixStream, ctx: ServerCtx) {
     let _ = stream.write_respone(&resp).await;
 }
 
-async fn mount_share(
-    name: FullShareName,
-    path: String,
-    ctx: &ServerCtx,
-) -> Result<ServerResponse, ServerError> {
-    todo!()
+async fn mount_share(path: PathBuf, name: FullShareName, state: SharedState) -> Result<ServerResponse, ServerError> {
+    let peer_id = match state.read().await.get_peers_by_socket().get_by_right(&name.addr.into()) {
+        Some(val) => val.clone(),
+        None => todo!(),
+    };
+
+    Ok(ServerResponse::Ok)
 }
 
 fn validate_path(path: String) -> Result<PathBuf, ServerError> {

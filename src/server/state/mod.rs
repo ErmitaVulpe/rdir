@@ -8,13 +8,16 @@ use std::{
 use bimap::BiBTreeMap;
 use bitcode::{Decode, Encode};
 use derive_more::{Display, Eq, IsVariant, PartialEq};
-use libp2p::PeerId;
-use tokio::sync::{RwLock, mpsc};
+use snowstorm::Keypair;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    PeerIdDto, PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
-    shares::{CommonShareName, FullShareName, ShareName},
+use crate::{
+    common::{
+        PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
+        shares::{CommonShareName, FullShareName, ShareName},
+    },
+    server::{SERVER_CANCEL, peer::PeerId},
 };
 
 pub mod error;
@@ -22,20 +25,49 @@ use error::*;
 
 pub type SharedState = Arc<RwLock<State>>;
 
-#[derive(Debug, Default)]
 pub struct State {
     peers: BTreeMap<PeerId, Peer>,
     peers_by_socket: BiBTreeMap<PeerId, SocketAddrV4>,
     remote_shares: BTreeMap<FullShareName, RemoteShare>,
     shares: BTreeMap<CommonShareName, Share>,
     shutdown_server: CancellationToken,
+
+    identity: Keypair,
 }
 
 impl State {
+    pub fn new(identity: Keypair) -> Self {
+        Self {
+            peers: Default::default(),
+            peers_by_socket: Default::default(),
+            remote_shares: Default::default(),
+            shares: Default::default(),
+            shutdown_server: Default::default(),
+            identity,
+        }
+    }
+
+    pub fn get_peers_by_socket(&self) -> &BiBTreeMap<PeerId, SocketAddrV4> {
+        &self.peers_by_socket
+    }
+
+    pub fn get_identity(&self) -> &Keypair {
+        &self.identity
+    }
+
+    pub fn get_share_names(&self) -> Vec<CommonShareName> {
+        self.shares.keys().cloned().collect()
+    }
+
+    pub fn update_peer_socket(&mut self, peer_id: PeerId, new_socket: SocketAddrV4) {
+        let res = self.peers_by_socket.insert(peer_id, new_socket);
+        debug_assert!(matches!(res, bimap::Overwritten::Left(_, _)));
+    }
+
     pub fn peers_dto(&self) -> PeersDto {
         let mut data = BTreeMap::new();
         for (peer_id, peer) in &self.peers {
-            data.insert(PeerIdDto::from(*peer_id), peer.address);
+            data.insert(peer_id.clone(), peer.address);
         }
 
         PeersDto(data)
@@ -62,17 +94,12 @@ impl State {
         SharesDto(self.shares.values().map(ShareDto::from).collect())
     }
 
-    pub fn update_peer_socket(&mut self, peer_id: PeerId, new_socket: SocketAddrV4) {
-        let res = self.peers_by_socket.insert(peer_id, new_socket);
-        debug_assert!(matches!(res, bimap::Overwritten::Left(_, _)));
-    }
-
     pub fn new_peer_connected_to_share(
         &mut self,
         peer_id: PeerId,
         mut peer: Peer,
         share_name: CommonShareName,
-    ) -> Result<PeerId, NewPeerConnectedToShareError> {
+    ) -> Result<(), NewPeerConnectedToShareError> {
         if self.peers_by_socket.contains_right(&peer.address) {
             return Err(RepeatedPeerError.into());
         }
@@ -86,13 +113,13 @@ impl State {
         peer.used_shares.insert(share_name);
         let res = self
             .peers_by_socket
-            .insert_no_overwrite(peer_id, peer.address);
+            .insert_no_overwrite(peer_id.clone(), peer.address);
         debug_assert!(res.is_ok());
-        let res = self.peers.insert(peer_id, peer);
+        let res = self.peers.insert(peer_id.clone(), peer);
         debug_assert!(res.is_none());
-        let res = share.participants.insert(peer_id);
+        let res = share.participants.insert(peer_id.clone());
         debug_assert!(res);
-        Ok(peer_id)
+        Ok(())
     }
 
     /// Must not be called after peer was dropped
@@ -151,9 +178,6 @@ impl State {
         }
         let res = peer.used_shares.remove(&share_name);
         debug_assert!(res);
-        peer.notification_tx
-            .send(StateNotification::KickedFromShare(share_name))
-            .unwrap();
         self.try_drop_peer(peer_id);
         Ok(())
     }
@@ -172,7 +196,7 @@ impl State {
                 let peer = entry.get();
                 if peer.used_shares.len() + peer.used_remote_shares.len() == 0 {
                     let (_, peer) = entry.remove_entry();
-                    peer.kill_peer.cancel();
+                    peer.kill_peer_conn.cancel();
                     true
                 } else {
                     false
@@ -204,9 +228,6 @@ impl State {
             let peer = self.peers.get_mut(&participant_id).unwrap();
             let res = peer.used_shares.remove(&name);
             debug_assert!(res);
-            peer.notification_tx
-                .send(StateNotification::KickedFromShare(name.clone()))
-                .unwrap();
             self.try_drop_peer(participant_id);
         }
 
@@ -330,10 +351,7 @@ impl State {
 #[derive(Clone, Debug)]
 pub struct Peer {
     pub address: SocketAddrV4,
-    kill_peer: CancellationToken,
-    notification_tx: mpsc::UnboundedSender<StateNotification>,
-    /// All the shares that the peer has
-    shares: BTreeSet<CommonShareName>,
+    kill_peer_conn: CancellationToken,
     /// Shares of the peer that we are using
     used_remote_shares: BTreeSet<CommonShareName>,
     /// Our shares that the peer is using
@@ -341,16 +359,10 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(
-        address: SocketAddrV4,
-        notification_tx: mpsc::UnboundedSender<StateNotification>,
-        kill_peer: CancellationToken,
-    ) -> Self {
+    pub fn new(address: SocketAddrV4) -> Self {
         Self {
             address,
-            kill_peer,
-            notification_tx,
-            shares: Default::default(),
+            kill_peer_conn: SERVER_CANCEL.child_token(),
             used_remote_shares: Default::default(),
             used_shares: Default::default(),
         }
@@ -379,11 +391,4 @@ pub struct RemoteShare {
     owner: PeerId,
     pub name: CommonShareName,
     pub mount_path: PathBuf,
-}
-
-/// Notification sent from the State to the peer handler
-#[derive(Encode, Decode, Clone, Debug, Display, IsVariant, PartialEq, Eq)]
-pub enum StateNotification {
-    JoinShare(CommonShareName),
-    KickedFromShare(CommonShareName),
 }

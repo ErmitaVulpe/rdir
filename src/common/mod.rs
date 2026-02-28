@@ -2,7 +2,6 @@ use std::{collections::BTreeMap, fmt, net::SocketAddrV4};
 
 use bitcode::{Decode, Encode};
 use derive_more::{Display, Error, From, IsVariant};
-use libp2p::PeerId;
 
 use crate::{
     args::{Args, ConnectCommand, ShareCommand},
@@ -10,7 +9,7 @@ use crate::{
         CommonShareName, CommonShareNameParseError, FullShareName, RemotePeerAddr, ShareName,
     },
     server::{
-        ServerError,
+        PeerId, ServerError,
         state::{
             RemoteShare, Share,
             error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
@@ -181,7 +180,7 @@ impl fmt::Display for RemoteShareDto {
 pub struct ShareDto {
     pub name: CommonShareName,
     pub path: String,
-    pub participants: Vec<PeerIdDto>,
+    pub participants: Vec<PeerId>,
 }
 
 impl From<&Share> for ShareDto {
@@ -189,7 +188,7 @@ impl From<&Share> for ShareDto {
         Self {
             name: value.name.clone(),
             path: value.path.to_string_lossy().to_string(),
-            participants: value.participants.iter().cloned().map(Into::into).collect(),
+            participants: value.participants.iter().cloned().collect(),
         }
     }
 }
@@ -215,7 +214,7 @@ impl fmt::Display for ShareDto {
 }
 
 #[derive(Encode, Decode, Clone, Debug)]
-pub struct PeersDto(pub BTreeMap<PeerIdDto, SocketAddrV4>);
+pub struct PeersDto(pub BTreeMap<PeerId, SocketAddrV4>);
 
 impl fmt::Display for PeersDto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -267,22 +266,6 @@ impl From<ServerError> for ServerErrorDto {
             ServerError::RepeatedShare(err) => Self::RepeatedShare(err),
             ServerError::ShareDoesntExit(err) => Self::ShareDoesntExit(err),
         }
-    }
-}
-
-/// Base58 encoded `libp2p::PeerId`
-#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PeerIdDto(String);
-
-impl From<PeerId> for PeerIdDto {
-    fn from(value: PeerId) -> Self {
-        PeerIdDto(value.to_base58())
-    }
-}
-
-impl fmt::Display for PeerIdDto {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.0[..f.width().unwrap_or(8)])
     }
 }
 

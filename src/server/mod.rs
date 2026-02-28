@@ -5,14 +5,12 @@ use std::{
 };
 
 use derive_more::{Display, Error, From, IsVariant};
-use libp2p::{Multiaddr, StreamProtocol, multiaddr, noise, tcp, yamux};
-use libp2p_stream::Control;
 use tokio::{
-    net::UnixListener,
+    net::{TcpListener, UnixListener},
     select,
     signal::unix::{SignalKind, signal},
     spawn,
-    sync::{RwLock, mpsc},
+    sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -21,12 +19,11 @@ use crate::{
     args::Args,
     common::shares::CommonShareNameParseError,
     server::{
-        peer::accept_peers,
+        peer::{NOISE_PARAMS, accept_peers},
         state::{
-            SharedState, State,
+            State,
             error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
         },
-        swarm::SwarmCommand,
     },
 };
 
@@ -34,9 +31,9 @@ mod ipc;
 mod peer;
 mod setup;
 pub mod state;
-mod swarm;
 
-pub const PROTOCOL_ADDR: StreamProtocol = StreamProtocol::new("/rdir/1.0");
+pub use peer::PeerId;
+
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
 pub const LOGS_DIR: &str = "logs";
 pub const LOGS_PREFIX: &str = "rdir.log";
@@ -62,36 +59,23 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
 
 async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> anyhow::Result<()> {
     // TEMP new_identity
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::new(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_behaviour(|_| libp2p_stream::Behaviour::new())?
-        .build();
+    let keypair = snowstorm::Builder::new(NOISE_PARAMS.clone()).generate_keypair()?;
+    let local_peer_id = PeerId::from(&keypair);
+    info!("Local peer id: {local_peer_id}");
+
+    std_listener.set_nonblocking(true)?;
+    let unix_listener = UnixListener::from_std(std_listener)?;
 
     let socket_addr = args
         .tcp_socket
         .unwrap_or(SocketAddrV4::new([0; 4].into(), NETWORK_PORT));
-    swarm.listen_on(multiaddr_from_sock(&socket_addr))?;
+    let tcp_listener = TcpListener::bind(socket_addr).await?;
 
-    let state = Arc::new(RwLock::new(State::default()));
-    let control = swarm.behaviour().new_control();
-    let (swarm_command_tx, swarm_commamd_rx) = mpsc::channel(16);
-    let server_ctx = ServerCtx {
-        state: state.clone(),
-        control,
-        swarm_command_tx,
-    };
+    let state = Arc::new(RwLock::new(State::new(keypair)));
 
-    std_listener.set_nonblocking(true)?;
-    let unix_listener = UnixListener::from_std(std_listener)?;
-    let ipc_fut = ipc::accpet_client(unix_listener, server_ctx.clone());
+    let ipc_fut = ipc::accpet_client(unix_listener, state.clone());
     spawn(SERVER_CANCEL.run_until_cancelled(ipc_fut));
-    spawn(SERVER_CANCEL.run_until_cancelled(accept_peers(server_ctx)));
-    spawn(swarm::drive_swarm(swarm, state, swarm_commamd_rx));
+    spawn(SERVER_CANCEL.run_until_cancelled(accept_peers(tcp_listener, state.clone())));
 
     await_shutdown().await;
     Ok(())
@@ -116,17 +100,6 @@ async fn await_shutdown() {
     }
 
     info!("Shutting down");
-}
-
-fn multiaddr_from_sock(socket: &SocketAddrV4) -> Multiaddr {
-    Multiaddr::from(*socket.ip()).with(multiaddr::Protocol::Tcp(socket.port()))
-}
-
-#[derive(Clone)]
-struct ServerCtx {
-    control: Control,
-    state: SharedState,
-    swarm_command_tx: mpsc::Sender<SwarmCommand>,
 }
 
 #[derive(Debug, Display, Error, From, IsVariant)]
