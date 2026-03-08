@@ -6,10 +6,11 @@ use std::{
 };
 
 use bimap::BiBTreeMap;
-use bitcode::{Decode, Encode};
-use derive_more::{Display, Eq, IsVariant, PartialEq};
 use snowstorm::Keypair;
-use tokio::sync::RwLock;
+use tokio::{
+    io,
+    sync::{RwLock, mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -17,7 +18,10 @@ use crate::{
         PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto,
         shares::{CommonShareName, FullShareName, ShareName},
     },
-    server::{SERVER_CANCEL, peer::PeerId},
+    server::{
+        SERVER_CANCEL,
+        peer::{PeerId, PeerInitResp, call::PeerInitReq},
+    },
 };
 
 pub mod error;
@@ -30,7 +34,6 @@ pub struct State {
     peers_by_socket: BiBTreeMap<PeerId, SocketAddrV4>,
     remote_shares: BTreeMap<FullShareName, RemoteShare>,
     shares: BTreeMap<CommonShareName, Share>,
-    shutdown_server: CancellationToken,
 
     identity: Keypair,
 }
@@ -42,7 +45,6 @@ impl State {
             peers_by_socket: Default::default(),
             remote_shares: Default::default(),
             shares: Default::default(),
-            shutdown_server: Default::default(),
             identity,
         }
     }
@@ -97,10 +99,10 @@ impl State {
     pub fn new_peer_connected_to_share(
         &mut self,
         peer_id: PeerId,
-        mut peer: Peer,
+        peer_addr: SocketAddrV4,
         share_name: CommonShareName,
-    ) -> Result<(), NewPeerConnectedToShareError> {
-        if self.peers_by_socket.contains_right(&peer.address) {
+    ) -> Result<mpsc::Receiver<PeerNotification>, NewPeerConnectedToShareError> {
+        if self.peers_by_socket.contains_right(&peer_addr) {
             return Err(RepeatedPeerError.into());
         }
 
@@ -110,6 +112,8 @@ impl State {
         };
 
         // all checks passed, now modifying
+        let (notification_tx, notification_rx) = mpsc::channel(4);
+        let mut peer = Peer::new(peer_addr, notification_tx);
         peer.used_shares.insert(share_name);
         let res = self
             .peers_by_socket
@@ -119,7 +123,7 @@ impl State {
         debug_assert!(res.is_none());
         let res = share.participants.insert(peer_id.clone());
         debug_assert!(res);
-        Ok(())
+        Ok(notification_rx)
     }
 
     /// Must not be called after peer was dropped
@@ -247,64 +251,70 @@ impl State {
         todo!()
     }
 
-    /*
     pub fn new_peer_join_remote_share(
         &mut self,
         peer_id: PeerId,
-        mut peer: Peer,
-        name: FullShareName,
+        peer_addr: SocketAddrV4,
+        name: CommonShareName,
         mount_path: PathBuf,
-    ) -> Result<PeerId, RepeatedRemoteShareError> {
-        debug_assert!(!self.peers_by_socket.contains_key(&peer.address));
-        let Entry::Vacant(entry) = self.remote_shares.entry(name) else {
-            return Err(RepeatedRemoteShareError);
+    ) -> Result<mpsc::Receiver<PeerNotification>, NewPeerJoinRemoteShareError> {
+        if self.peers_by_socket.contains_right(&peer_addr) {
+            return Err(RepeatedPeerError.into());
+        }
+
+        let full_name = FullShareName::from((peer_addr, name));
+        let Entry::Vacant(entry) = self.remote_shares.entry(full_name) else {
+            return Err(RepeatedRemoteShareError.into());
         };
 
         let name = entry.key().clone();
         let remote_share = RemoteShare {
-            owner: peer_id,
+            owner: peer_id.clone(),
             name: name.name.clone(),
             mount_path,
         };
         entry.insert(remote_share);
 
-        let res = peer.used_remote_shares.insert(name);
+        let (notification_tx, notification_rx) = mpsc::channel(4);
+        let mut peer = Peer::new(peer_addr, notification_tx);
+        let res = peer.used_remote_shares.insert(name.name);
         debug_assert!(res);
-        let res = self.peers_by_socket.insert(peer.address, peer_id);
+        let res = self
+            .peers_by_socket
+            .insert_no_overwrite(peer_id.clone(), peer.address);
+        debug_assert!(res.is_ok());
+        let res = self.peers.insert(peer_id.clone(), peer);
         debug_assert!(res.is_none());
-        let res = self.peers.insert(peer_id, peer);
-        debug_assert!(res.is_none());
-        Ok(peer_id)
+        Ok(notification_rx)
     }
 
     pub fn join_remote_share(
         &mut self,
         peer_id: PeerId,
-        name: FullShareName,
+        name: CommonShareName,
         mount_path: PathBuf,
-    ) -> Result<(), RepeatedRemoteShareError> {
-        let Entry::Vacant(entry) = self.remote_shares.entry(name) else {
-            return Err(RepeatedRemoteShareError);
+    ) -> Result<(), PeerJoinRemoteShareError> {
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return Err(PeerDoesntExistError.into());
         };
 
-        let name = entry.key().clone();
-        let remote_share = RemoteShare {
-            owner: peer_id,
-            name: name.name.clone(),
+        let full_name = FullShareName::from((peer.address, name));
+        let Entry::Vacant(remote_share_entry) = self.remote_shares.entry(full_name) else {
+            return Err(RepeatedRemoteShareError.into());
+        };
+
+        let name = remote_share_entry.key().clone();
+        if !peer.used_shares.insert(name.name.clone()) {
+            return Err(RepeatedRemoteShareError.into());
+        }
+
+        remote_share_entry.insert(RemoteShare {
+            owner: peer_id.clone(),
+            name: name.name,
             mount_path,
-        };
-        entry.insert(remote_share);
-
-        let res = self
-            .peers
-            .get_mut(&peer_id)
-            .unwrap()
-            .used_remote_shares
-            .insert(name);
-        debug_assert!(res);
+        });
         Ok(())
     }
-    */
 
     pub fn exit_remote_share(
         &mut self,
@@ -343,14 +353,20 @@ impl State {
     /// Sends a global shutdown signal if server has no peers and no shares
     pub fn try_close_server(&self) {
         if self.peers.is_empty() && self.shares.is_empty() {
-            self.shutdown_server.cancel();
+            SERVER_CANCEL.cancel();
         }
     }
+}
+
+pub struct PeerNotification {
+    pub req: PeerInitReq,
+    pub resp: Option<oneshot::Sender<PeerInitResp>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Peer {
     pub address: SocketAddrV4,
+    pub conn_notification: mpsc::Sender<PeerNotification>,
     kill_peer_conn: CancellationToken,
     /// Shares of the peer that we are using
     used_remote_shares: BTreeSet<CommonShareName>,
@@ -359,9 +375,10 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(address: SocketAddrV4) -> Self {
+    fn new(address: SocketAddrV4, notification_tx: mpsc::Sender<PeerNotification>) -> Self {
         Self {
             address,
+            conn_notification: notification_tx,
             kill_peer_conn: SERVER_CANCEL.child_token(),
             used_remote_shares: Default::default(),
             used_shares: Default::default(),

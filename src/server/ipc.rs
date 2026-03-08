@@ -4,12 +4,16 @@ use tokio::{
     net::{UnixListener, UnixStream},
     spawn,
 };
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::{
-    common::{ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream, shares::FullShareName},
+    common::{
+        ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream,
+        shares::FullShareName,
+    },
     server::{
         SERVER_CANCEL, ServerError,
+        peer::call::PeerInitReq,
         state::{Share, SharedState},
     },
 };
@@ -18,14 +22,18 @@ pub async fn accpet_client(listener: UnixListener, state: SharedState) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                spawn(handle_client(stream, state.clone()));
+                let state_clone = state.clone();
+                spawn(async move {
+                    handle_client(stream, &state_clone).await;
+                    state_clone.read().await.try_close_server();
+                });
             }
             Err(e) => error!("Error while accepting a local client: {e}"),
         }
     }
 }
 
-async fn handle_client(stream: UnixStream, state: SharedState) {
+async fn handle_client(stream: UnixStream, state: &SharedState) {
     let mut stream = IpcStream::new_server(stream);
     let message = match stream.read_command().await {
         Ok(val) => val,
@@ -44,7 +52,7 @@ async fn handle_client(stream: UnixStream, state: SharedState) {
                     Ok(ServerResponse::LsMountedShares(shares))
                 }
                 ConnectMessage::Mount { path, name } => {
-                    mount_share(validate_path(path)?, name, state).await
+                    mount_share(validate_path(path)?, name, state.clone()).await
                 }
                 ConnectMessage::Unmount { name } => {
                     Ok(state.write().await.exit_remote_share(name).into())
@@ -90,15 +98,31 @@ async fn handle_client(stream: UnixStream, state: SharedState) {
 
     let resp = result.unwrap_or_else(ServerResponse::from);
     if let ServerResponse::Err(e) = &resp {
-        error!("Error while handling local client: {e}");
+        error!("Error while handling local client request: {e}");
     }
     let _ = stream.write_respone(&resp).await;
 }
 
-async fn mount_share(path: PathBuf, name: FullShareName, state: SharedState) -> Result<ServerResponse, ServerError> {
-    let peer_id = match state.read().await.get_peers_by_socket().get_by_right(&name.addr.into()) {
-        Some(val) => val.clone(),
-        None => todo!(),
+async fn mount_share(
+    path: PathBuf,
+    name: FullShareName,
+    state: SharedState,
+) -> Result<ServerResponse, ServerError> {
+    let addr = name.addr.into();
+    let lock = state.read().await;
+    match lock.get_peers_by_socket().get_by_right(&addr) {
+        Some(peer_id) => {
+            drop(lock);
+            todo!()
+        }
+        None => {
+            let intent = PeerInitReq::JoinShare {
+                name: name.name,
+                path,
+            };
+            drop(lock); // Needed to not clone state
+            let resp = super::peer::call::call_peer(addr, intent, state).await?;
+        }
     };
 
     Ok(ServerResponse::Ok)

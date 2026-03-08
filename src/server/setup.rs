@@ -49,7 +49,7 @@ unsafe fn daemonize(args: &Args) -> anyhow::Result<()> {
 }
 
 fn init_logs() -> WorkerGuard {
-    let file_appender = tracing_appender::rolling::daily(LOGS_DIR, LOGS_PREFIX);
+    let file_appender = tracing_appender::rolling::daily(&*LOGS_DIR, LOGS_PREFIX);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::DEBUG)

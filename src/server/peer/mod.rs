@@ -2,7 +2,7 @@ use core::fmt;
 use std::{
     net::{SocketAddr, SocketAddrV4},
     sync::LazyLock,
-    task::ready,
+    task::{Poll, ready},
     time::Duration,
 };
 
@@ -14,8 +14,10 @@ use derive_more::{Display, Error, From, IsVariant};
 use futures::{SinkExt, StreamExt, future::poll_fn};
 use snowstorm::{Keypair, NoiseParams, NoiseStream};
 use tokio::{
+    io,
     net::{TcpListener, TcpStream},
     spawn,
+    sync::mpsc,
 };
 use tokio_util::{
     codec::{Framed, LengthDelimitedCodec},
@@ -26,10 +28,17 @@ use tracing::{debug, error, info};
 
 use crate::{
     common::shares::CommonShareName,
-    server::state::{Peer, SharedState, error::NewPeerConnectedToShareError},
+    server::state::{
+        PeerNotification, SharedState,
+        error::{
+            NewPeerConnectedToShareError, PeerConnectedToShareError, PeerDoesntExistError,
+            RepeatedPeerError, ShareDoesntExistError,
+        },
+    },
 };
 
 pub mod call;
+mod conn;
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -88,7 +97,7 @@ async fn handle_peer_inner(
         .local_private_key(&state.read().await.get_identity().private)
         .build_responder()?;
 
-    // TODO add verifier
+    // TODO add verifier for whitelist
     let stream = NoiseStream::handshake(stream, noise)
         .timeout(HANDSHAKE_TIMEOUT)
         .await
@@ -101,35 +110,39 @@ async fn handle_peer_inner(
 
     let mut conn = yamux::Connection::new(stream.compat(), Default::default(), yamux::Mode::Server);
     let first_stream = poll_fn(|cx| conn.poll_next_inbound(cx))
+        .timeout(MESSAGE_TIMEOUT)
         .await
+        .context("Peer didnt open the first stream in time")?
         .context("Peer closed connection before first stream opened")??;
 
-    let keep_alive = handle_stream(first_stream, peer_id, peer_socket, state).await?;
-    match keep_alive {
-        true => {
-            spawn(long_lived_conn_handler(conn));
+    debug!("AAAAAAAAAAAAAAAAA");
+
+    let handle_stream_result =
+        handle_stream_new_peer(first_stream, peer_id, peer_socket, state).await?;
+    match handle_stream_result {
+        Some(rx) => {
+            spawn(long_lived_conn_handler(conn, rx));
         }
-        false => poll_fn(|cx| conn.poll_close(cx)).await?,
+        None => poll_fn(|cx| conn.poll_close(cx)).await?,
     }
 
     Ok(())
 }
 
-async fn long_lived_conn_handler(mut conn: yamux::Connection<Compat<NoiseStream<TcpStream>>>) {
-    let _: () = poll_fn(|cx| {
-        let _stream = ready!(conn.poll_next_inbound(cx));
-        unimplemented!()
-    })
-    .await;
+async fn long_lived_conn_handler(
+    mut conn: yamux::Connection<Compat<NoiseStream<TcpStream>>>,
+    command_rx: mpsc::Receiver<PeerNotification>,
+) {
+    poll_fn(|cx| -> Poll<anyhow::Result<()>> { todo!() }).await;
 }
 
 /// returns whether this stream spawned a long-lived task
-async fn handle_stream(
+async fn handle_stream_new_peer(
     stream: yamux::Stream,
     peer_id: PeerId,
     peer_socket: SocketAddrV4,
     state: SharedState,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<mpsc::Receiver<PeerNotification>>> {
     let mut stream = LengthDelimitedCodec::builder()
         .length_field_length(3)
         .new_framed(stream.compat());
@@ -138,60 +151,151 @@ async fn handle_stream(
         .timeout(MESSAGE_TIMEOUT)
         .await?
         .context("Peer closed a stream before sending an init request")??;
-    let req: PeerInitReq = decode(&bytes)?;
+    let req: PeerInitReqDto = decode(&bytes)?;
 
     match req {
-        PeerInitReq::JoinShare { name } => {
-            let peer = Peer::new(peer_socket);
-            let result = state
-                .write()
-                .await
-                .new_peer_connected_to_share(peer_id, peer, name);
-            let resp = match result {
-                Ok(()) => PeerInitResp::Ok,
-                Err(err) => PeerInitResp::Err(err.into()),
-            };
-            let bytes = encode(&resp);
-            let res = stream.send(bytes.into()).await;
-            match res {
-                Ok(()) => {
+        PeerInitReqDto::JoinShare { name } => {
+            let result =
+                state
+                    .write()
+                    .await
+                    .new_peer_connected_to_share(peer_id, peer_socket, name);
+            match result {
+                Ok(rx) => {
+                    let bytes = encode(&PeerInitResp::Ok);
+                    stream
+                        .send(bytes.into())
+                        .await
+                        .context("Failed to send a response")?;
+
                     spawn(long_lived_share_server(stream));
-                    Ok(true)
+                    Ok(Some(rx))
                 }
-                Err(err) => Err(err).context("Failed to send a response"),
+                Err(err) => {
+                    let bytes = encode(&PeerInitResp::Err(err.into()));
+                    stream
+                        .send(bytes.into())
+                        .await
+                        .context("Failed to send a response")?;
+                    Ok(None)
+                }
             }
         }
-        PeerInitReq::ListShares => {
+        PeerInitReqDto::ListShares => {
             let names = state.read().await.get_share_names();
             let resp = PeerInitResp::ListShares { names };
             let bytes = encode(&resp);
             let res = stream.send(bytes.into()).await;
             match res {
-                Ok(()) => Ok(false),
+                Ok(()) => Ok(None),
                 Err(err) => Err(err).context("Failed to send a response"),
             }
         }
     }
 }
 
+// async fn handle_stream(
+//     stream: yamux::Stream,
+//     peer_id: PeerId,
+//     state: SharedState,
+// ) -> anyhow::Result<PeerInitResp> {
+//     let mut stream = LengthDelimitedCodec::builder()
+//         .length_field_length(3)
+//         .new_framed(stream.compat());
+//     let bytes = stream
+//         .next()
+//         .timeout(MESSAGE_TIMEOUT)
+//         .await?
+//         .context("Peer closed a stream before sending an init request")??;
+//     let req: PeerInitReqDto = decode(&bytes)?;
+//
+//     match req {
+//         PeerInitReqDto::JoinShare { name } => {
+//             let result = state.write().await.peer_connected_to_share(peer_id, name);
+//             match result {
+//                 Ok(()) => {
+//                     let bytes = encode(&PeerInitResp::Ok);
+//                     stream
+//                         .send(bytes.into())
+//                         .await
+//                         .context("Failed to send a response")?;
+//
+//                     spawn(long_lived_share_server(stream));
+//                     Ok()
+//                 }
+//                 Err(err) => {
+//                     let bytes = encode(&PeerInitResp::Err(err.into()));
+//                     stream
+//                         .send(bytes.into())
+//                         .await
+//                         .context("Failed to send a response")?;
+//                     Ok(())
+//                 }
+//             }
+//         }
+//         PeerInitReqDto::ListShares => {
+//             let names = state.read().await.get_share_names();
+//             let resp = PeerInitResp::ListShares { names };
+//             let bytes = encode(&resp);
+//             let res = stream.send(bytes.into()).await;
+//             match res {
+//                 Ok(()) => Ok(()),
+//                 Err(err) => Err(err).context("Failed to send a response"),
+//             }
+//         }
+//     }
+// }
+
 async fn long_lived_share_server(_stream: Framed<Compat<yamux::Stream>, LengthDelimitedCodec>) {
-    debug!("Entered a long lived peer handler!");
+    debug!("Entered a long lived share server");
 }
 
-#[derive(Encode, Decode, Clone, Debug)]
-enum PeerInitReq {
+#[derive(Encode, Decode, Clone, Debug, IsVariant)]
+enum PeerInitReqDto {
+    /// Resp can be `PeerInitResp::{Err, Ok}`
     JoinShare { name: CommonShareName },
+    /// Resp can be `PeerInitResp::ListShares`
     ListShares,
 }
 
-#[derive(Encode, Decode, Clone, Debug)]
-enum PeerInitResp {
+#[derive(Encode, Decode, Clone, Debug, IsVariant)]
+pub enum PeerInitResp {
     Err(PeerInitError),
     ListShares { names: Vec<CommonShareName> },
     Ok,
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
-enum PeerInitError {
-    NewPeerConnectedToShare(NewPeerConnectedToShareError),
+pub enum PeerInitError {
+    PeerDoesntExist(PeerDoesntExistError),
+    RepeatedPeer(RepeatedPeerError),
+    ShareDoesntExist(ShareDoesntExistError),
+}
+
+impl From<NewPeerConnectedToShareError> for PeerInitError {
+    fn from(value: NewPeerConnectedToShareError) -> Self {
+        match value {
+            NewPeerConnectedToShareError::RepeatedPeer(err) => Self::RepeatedPeer(err),
+            NewPeerConnectedToShareError::ShareDoesntExist(err) => Self::ShareDoesntExist(err),
+        }
+    }
+}
+
+impl From<PeerConnectedToShareError> for PeerInitError {
+    fn from(value: PeerConnectedToShareError) -> Self {
+        match value {
+            PeerConnectedToShareError::PeerDoesntExist(err) => Self::PeerDoesntExist(err),
+            PeerConnectedToShareError::ShareDoesntExist(err) => Self::ShareDoesntExist(err),
+        }
+    }
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, Error)]
+#[display("Peer sent an invalid message for the current state")]
+pub struct ProtocolError;
+
+impl From<ProtocolError> for io::Error {
+    fn from(value: ProtocolError) -> Self {
+        io::Error::new(io::ErrorKind::InvalidData, value)
+    }
 }

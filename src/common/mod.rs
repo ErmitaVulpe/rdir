@@ -243,25 +243,28 @@ impl fmt::Display for SharesDto {
 
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
 pub enum ServerErrorDto {
+    #[display("Failed to call a peer: {_0}")]
+    CallPeer(#[error(ignore)] String),
     #[display("Specified share name is invalid")]
     CommonShareNameParse(CommonShareNameParseError),
     ExitPeerShare(ExitPeerShareError),
-    InvalidShareName,
-    RepeatedShare(#[error(ignore)] RepeatedShare),
-    ShareDoesntExit(#[error(ignore)] ShareDoesntExistError),
-    #[display("Path needs to be absolute")]
-    RelativePath,
     #[display("Path needs to point to a directory")]
     PathNotDir,
+    Protocol(crate::server::PeerProtocolError),
+    RepeatedShare(#[error(ignore)] RepeatedShare),
+    #[display("Path needs to be absolute")]
+    RelativePath,
+    ShareDoesntExit(#[error(ignore)] ShareDoesntExistError),
 }
 
 impl From<ServerError> for ServerErrorDto {
     fn from(value: ServerError) -> Self {
         match value {
+            ServerError::CallPeer(err) => Self::CallPeer(format!("{err:#}")),
             ServerError::CommonShareNameParse(err) => Self::CommonShareNameParse(err),
             ServerError::ExitPeerShare(err) => Self::ExitPeerShare(err),
-            ServerError::InvalidShareName => Self::InvalidShareName,
             ServerError::PathNotDir => Self::PathNotDir,
+            ServerError::Protocol(err) => Self::Protocol(err),
             ServerError::RelativePath => Self::RelativePath,
             ServerError::RepeatedShare(err) => Self::RepeatedShare(err),
             ServerError::ShareDoesntExit(err) => Self::ShareDoesntExit(err),

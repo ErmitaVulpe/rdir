@@ -1,9 +1,11 @@
 use std::{
     net::SocketAddrV4,
+    path::PathBuf,
     sync::{Arc, LazyLock},
     time::Duration,
 };
 
+use anyhow::Context;
 use derive_more::{Display, Error, From, IsVariant};
 use tokio::{
     net::{TcpListener, UnixListener},
@@ -13,13 +15,13 @@ use tokio::{
     sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     args::Args,
     common::shares::CommonShareNameParseError,
     server::{
-        peer::{NOISE_PARAMS, accept_peers},
+        peer::{NOISE_PARAMS, accept_peers, call::CallPeerError},
         state::{
             State,
             error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
@@ -33,9 +35,14 @@ mod setup;
 pub mod state;
 
 pub use peer::PeerId;
+pub use peer::ProtocolError as PeerProtocolError;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
-pub const LOGS_DIR: &str = "logs";
+pub static LOGS_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut log_dir = dirs::state_dir().unwrap();
+    log_dir.push("rdir");
+    log_dir
+});
 pub const LOGS_PREFIX: &str = "rdir.log";
 pub const SOCKET_NAME: &str = "rdir.sock";
 /// 29284
@@ -50,7 +57,11 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(main(&args, std_listener))?;
+    runtime.block_on(async {
+        if let Err(err) = main(&args, std_listener).await {
+            error!("{:#}", err.context("Error while initializing the server"));
+        }
+    });
     runtime.shutdown_timeout(Duration::from_hours(69420));
 
     setup::clean_up(&args);
@@ -64,12 +75,15 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     info!("Local peer id: {local_peer_id}");
 
     std_listener.set_nonblocking(true)?;
-    let unix_listener = UnixListener::from_std(std_listener)?;
+    let unix_listener =
+        UnixListener::from_std(std_listener).context("Failed to bind the unix socket")?;
 
     let socket_addr = args
         .tcp_socket
         .unwrap_or(SocketAddrV4::new([0; 4].into(), NETWORK_PORT));
-    let tcp_listener = TcpListener::bind(socket_addr).await?;
+    let tcp_listener = TcpListener::bind(socket_addr)
+        .await
+        .context("Failed to bind the TCP socket")?;
 
     let state = Arc::new(RwLock::new(State::new(keypair)));
 
@@ -105,14 +119,17 @@ async fn await_shutdown() {
 #[derive(Debug, Display, Error, From, IsVariant)]
 #[display("Server encountered an error while processing the command")]
 pub enum ServerError {
+    #[display("Failed to call a peer")]
+    CallPeer(CallPeerError),
     #[display("Specified share name is invalid")]
     CommonShareNameParse(CommonShareNameParseError),
     ExitPeerShare(ExitPeerShareError),
-    InvalidShareName,
-    RepeatedShare(RepeatedShare),
-    ShareDoesntExit(ShareDoesntExistError),
-    #[display("Path needs to be absolute")]
-    RelativePath,
     #[display("Path needs to point to a directory")]
     PathNotDir,
+    Protocol(PeerProtocolError),
+    #[display("Supplied share name is invalid")]
+    RepeatedShare(RepeatedShare),
+    #[display("Path needs to be absolute")]
+    RelativePath,
+    ShareDoesntExit(ShareDoesntExistError),
 }

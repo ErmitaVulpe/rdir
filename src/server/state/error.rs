@@ -37,10 +37,24 @@ pub enum NewPeerConnectedToShareError {
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Failed to join a share of new peer")]
+pub enum NewPeerJoinRemoteShareError {
+    RepeatedPeer(RepeatedPeerError),
+    RepeatedRemoteShare(RepeatedRemoteShareError),
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
 #[display("Peer failed to connect to a share")]
 pub enum PeerConnectedToShareError {
     PeerDoesntExist(PeerDoesntExistError),
     ShareDoesntExist(ShareDoesntExistError),
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+#[display("Peer failed to connect to a share")]
+pub enum PeerJoinRemoteShareError {
+    PeerDoesntExist(PeerDoesntExistError),
+    RepeatedRemoteShare(RepeatedRemoteShareError),
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]

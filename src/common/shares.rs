@@ -57,6 +57,16 @@ impl FromStr for FullShareName {
     }
 }
 
+impl From<(SocketAddrV4, CommonShareName)> for FullShareName {
+    fn from(value: (SocketAddrV4, CommonShareName)) -> Self {
+        let (addr, name) = value;
+        Self {
+            addr: addr.into(),
+            name,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
 pub enum FullShareNameParseError {
     #[display("{_0}")]
@@ -101,6 +111,17 @@ impl FromStr for RemotePeerAddr {
                 port: None,
             }),
         }
+    }
+}
+
+impl From<SocketAddrV4> for RemotePeerAddr {
+    fn from(value: SocketAddrV4) -> Self {
+        let addr = *value.ip();
+        let port = match value.port() {
+            NETWORK_PORT => None,
+            p => Some(p),
+        };
+        Self { addr, port }
     }
 }
 
