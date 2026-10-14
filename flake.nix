@@ -25,6 +25,8 @@
           mkShell {
             buildInputs = [
               cargo
+              clang
+              mold
               rust-analyzer
               rustPackages.clippy
               rustc

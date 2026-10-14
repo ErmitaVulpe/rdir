@@ -1,10 +1,10 @@
-use std::{fs::canonicalize, net::SocketAddrV4, path::PathBuf};
+use std::{fs::canonicalize, net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
-use smol::io;
+use tokio::io;
 
-use crate::common::shares::{CommonShareName, ShareName};
+use crate::common::shares::{ShareLocator, ShareName};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -25,16 +25,20 @@ pub struct Args {
     pub tmp_dir: PathBuf,
     /// Server TCP bind socket
     #[arg(env = "RDIR_TCP_SOCKET", global = true, long = "tcp-socket")]
-    pub tcp_socket: Option<SocketAddrV4>,
+    pub tcp_socket: Option<SocketAddr>,
     /// Server UDP bind socket
     #[arg(env = "RDIR_UDP_SOCKET", global = true, long = "udp-socket")]
-    pub udp_socket: Option<SocketAddrV4>,
+    pub udp_socket: Option<SocketAddr>,
 }
 
 impl Args {
-    pub fn expects_active_server(&self) -> bool {
+    pub fn should_server_start(&self) -> bool {
         match &self.command {
-            Command::Connect { .. } | Command::Discover => true,
+            Command::Connect { command } => match command {
+                ConnectCommand::Ls => false,
+                ConnectCommand::Mount { .. } | ConnectCommand::Unmount { .. } => true,
+            },
+            Command::Discover => true,
             Command::Share { command } => match command {
                 ShareCommand::Remove { .. } | ShareCommand::Share { .. } => true,
                 ShareCommand::Ls => false,
@@ -77,9 +81,12 @@ pub enum ConnectCommand {
     /// Mount a new remote share
     #[command(short_flag = 'm', alias = "m")]
     Mount {
-        /// Name of the remote share. If address is omitted, tries to search the local network
+        /// Name of the remote share
+        ///
+        /// Specified as: ipv4/example
+        /// or with port: ipv4:port/example
         #[arg()]
-        name: ShareName,
+        name: ShareLocator,
         /// Path to a dir to mount the share
         #[arg(value_hint=ValueHint::DirPath, value_parser=existing_path_parser)]
         path: PathBuf,
@@ -103,7 +110,7 @@ pub enum ShareCommand {
     Remove {
         /// Name of the share
         #[arg()]
-        name: CommonShareName,
+        name: ShareName,
     },
     /// create a new Share
     #[command(short_flag = 's', alias = "s")]
@@ -113,7 +120,7 @@ pub enum ShareCommand {
         path: PathBuf,
         /// Name of the share, defaults to the name of the shared dir
         #[arg()]
-        name: Option<CommonShareName>,
+        name: Option<ShareName>,
     },
 }
 
@@ -122,7 +129,7 @@ fn tmpdir_parser(s: &str) -> Result<PathBuf, &'static str> {
     if path.is_relative() {
         return Err("Value of tmpdir has to be an absolute path");
     }
-    path.push("rdir");
+    path.push(format!("rdir-{}", nix::unistd::Uid::current()));
     Ok(path)
 }
 

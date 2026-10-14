@@ -17,12 +17,14 @@ mod server;
 
 fn main() -> AnyResult<()> {
     let args = args::Args::parse();
+    // Set a restrictive file creation mask
+    unsafe { nix::libc::umask(0o077) };
 
     let sock_path = args.tmp_dir.join(SOCKET_NAME);
     let mut is_client = true;
     let maybe_sock = try_connect(&sock_path);
     let mut maybe_listener = None;
-    if args.expects_active_server() && maybe_sock.is_none() {
+    if args.should_server_start() && maybe_sock.is_none() {
         let _ = fs::create_dir(&args.tmp_dir);
         let listener = UnixListener::bind(&sock_path).context(format!(
             "Failed to create a unix socket at: {}",
@@ -43,7 +45,13 @@ fn main() -> AnyResult<()> {
 
     match is_client {
         true => client::Client::run(args, maybe_sock),
-        false => server::Server::run(args, maybe_listener.unwrap()),
+        false => {
+            let result = server::run(args, maybe_listener.unwrap());
+            if let Err(err) = &result {
+                tracing::error!("{err}");
+            }
+            result
+        }
     }
 }
 
