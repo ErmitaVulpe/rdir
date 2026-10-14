@@ -1,224 +1,186 @@
 use std::{
-    net::{AddrParseError, Ipv4Addr, SocketAddrV4},
+    fmt,
+    net::{IpAddr, SocketAddr},
     str::FromStr,
 };
 
 use bitcode::{Decode, Encode};
-use derive_more::{AsRef, Display, Error, From, IsVariant};
+use derive_more::{AsRef, Constructor, Display, Error, From, IsVariant};
 
 use crate::server::NETWORK_PORT;
 
-pub const MAX_SHARE_NAME_LENGTH: usize = 60;
+pub const MAX_SHARE_NAME_LENGTH: usize = 256;
 
-#[derive(
-    Encode, Decode, Clone, Debug, Display, From, IsVariant, PartialEq, Eq, PartialOrd, Ord,
-)]
-pub enum ShareName {
-    Common(CommonShareName),
-    Full(FullShareName),
+#[derive(Encode, Decode, Constructor, Clone, Debug)]
+pub struct ShareLocator {
+    pub authority: Authority,
+    pub share_name: ShareName,
+    pub fragment: Option<String>,
 }
 
-impl FromStr for ShareName {
-    type Err = ShareNameParseError;
+impl fmt::Display for ShareLocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "rdir://{}/{}", self.authority, self.share_name)?;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let full_err = match FullShareName::from_str(s) {
-            Ok(val) => return Ok(val.into()),
-            Err(e) => e,
-        };
-        if let Ok(val) = CommonShareName::from_str(s) {
-            return Ok(val.into());
+        if let Some(fragment) = &self.fragment
+            && !fragment.is_empty()
+        {
+            write!(f, "#{fragment}")?;
         }
-        Err(full_err.into())
+
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
-pub enum ShareNameParseError {
-    #[display("Failed to parse the address as either common or full share name")]
-    FailedToParseAsAny(#[error(source)] FullShareNameParseError),
-}
+impl FromStr for ShareLocator {
+    type Err = ShareLocatorParseError;
 
-#[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
-#[display("{addr}/{name}")]
-pub struct FullShareName {
-    pub addr: RemotePeerAddr,
-    pub name: CommonShareName,
-}
+    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
+        if let Some((schema, rest)) = s.split_once("://") {
+            if schema != "rdir" {
+                return Err(ShareLocatorParseError::InvalidSchema);
+            }
+            s = rest;
+        }
 
-impl FromStr for FullShareName {
-    type Err = FullShareNameParseError;
+        let (raw_authority, s) = s
+            .split_once('/')
+            .ok_or(ShareLocatorParseError::NoShareName)?;
+        let authority = Authority::from_str(raw_authority)?;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (raw_addr, raw_common_name) = s.split_once('/').ok_or(Self::Err::NoSeparator)?;
-        let addr = RemotePeerAddr::from_str(raw_addr)?;
-        let name = CommonShareName::from_str(raw_common_name)?;
-        Ok(FullShareName { addr, name })
+        let (share_name, fragment) = match s.split_once('#') {
+            Some((share_name, fragment)) => (share_name, Some(fragment.to_string())),
+            None => (s, None),
+        };
+
+        Ok(Self {
+            authority,
+            share_name: share_name.parse()?,
+            fragment,
+        })
     }
 }
 
-impl From<(SocketAddrV4, CommonShareName)> for FullShareName {
-    fn from(value: (SocketAddrV4, CommonShareName)) -> Self {
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+pub enum ShareLocatorParseError {
+    #[display("URL schema is not \"rdir\"")]
+    InvalidSchema,
+    AuthorityParse(AuthorityParseError),
+    #[display("No share name given in URL path")]
+    NoShareName,
+    #[display("Share name is too long")]
+    ShareNameTooLong(ValueTooLong),
+}
+
+impl From<(SocketAddr, ShareName)> for ShareLocator {
+    fn from(value: (SocketAddr, ShareName)) -> Self {
         let (addr, name) = value;
-        Self {
-            addr: addr.into(),
-            name,
-        }
+        Self::new(addr.into(), name, None)
     }
 }
 
-#[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
-pub enum FullShareNameParseError {
-    #[display("{_0}")]
-    InvalidAddress(#[error(source)] RemotePeerAddrParseError),
-    #[display("Failed to parse the common share name")]
-    InvalidCommonShareName(#[error(source)] CommonShareNameParseError),
-    #[display("Full share name requires a separator \"/\" between address and name")]
-    NoSeparator,
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Authority {
+    pub domain: Domain,
+    pub port: Option<u16>,
 }
 
-#[derive(Encode, Decode, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
-#[display("{addr}{}", port.as_ref()
-    .map(|p| format!(":{}", p))
-    .unwrap_or_default()
-)]
-pub struct RemotePeerAddr {
-    addr: Ipv4Addr,
-    port: Option<u16>,
+impl fmt::Display for Authority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.domain)?;
+
+        if let Some(port) = &self.port {
+            write!(f, ":{port}")?;
+        }
+
+        Ok(())
+    }
 }
 
-impl FromStr for RemotePeerAddr {
-    type Err = RemotePeerAddrParseError;
+impl FromStr for Authority {
+    type Err = AuthorityParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // TODO add sqids support
-        match s.split_once(':') {
-            Some((addr, port)) => Ok(Self {
-                addr: addr.parse()?,
-                port: {
-                    let port: u16 = port
-                        .parse()
-                        .map_err(|_| RemotePeerAddrParseError::PortNumber(port.to_string()))?;
-                    if port == NETWORK_PORT {
-                        None
-                    } else {
-                        Some(port)
-                    }
-                },
-            }),
-            None => Ok(Self {
-                addr: s.parse()?,
-                port: None,
-            }),
+        let (domain, port) = match s.split_once(':') {
+            Some((domain, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .map_err(|_| AuthorityParseError::InvalidPort)?;
+                (domain, (port != NETWORK_PORT).then_some(port))
+            }
+            None => (s, None),
+        };
+        Ok(Self {
+            domain: domain.parse()?,
+            port,
+        })
+    }
+}
+
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, PartialEq, Eq, IsVariant)]
+pub enum AuthorityParseError {
+    #[display("Failed to parse the port number")]
+    InvalidPort,
+    DomainParse(ValueTooLong),
+}
+
+impl From<SocketAddr> for Authority {
+    fn from(value: SocketAddr) -> Self {
+        Self {
+            domain: value.ip().into(),
+            port: Some(value.port()),
         }
     }
 }
 
-impl From<SocketAddrV4> for RemotePeerAddr {
-    fn from(value: SocketAddrV4) -> Self {
-        let addr = *value.ip();
-        let port = match value.port() {
-            NETWORK_PORT => None,
-            p => Some(p),
-        };
-        Self { addr, port }
+#[derive(Encode, Decode, Clone, Debug, Display, IsVariant, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Domain {
+    #[display("localhost")]
+    Local,
+    #[display("{_0}")]
+    Remote(String),
+}
+
+impl FromStr for Domain {
+    type Err = ValueTooLong;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const MAX_DNS_AUTHORITY_LENGTH: usize = 256;
+        if s.len() > MAX_DNS_AUTHORITY_LENGTH {
+            return Err(ValueTooLong(MAX_DNS_AUTHORITY_LENGTH));
+        }
+
+        Ok(Self::Remote(s.to_string()))
     }
 }
 
-#[derive(Clone, Debug, Display, Error, From, IsVariant, PartialEq, Eq)]
-pub enum RemotePeerAddrParseError {
-    #[display("Failed to parse the ip address")]
-    InvalidAddress(#[error(source)] AddrParseError),
-    #[display("Could not parse \"{_0}\" as port")]
-    PortNumber(#[error(ignore)] String),
-}
-
-impl From<RemotePeerAddr> for SocketAddrV4 {
-    fn from(val: RemotePeerAddr) -> Self {
-        SocketAddrV4::new(val.addr, val.port.unwrap_or(NETWORK_PORT))
+impl From<SocketAddr> for Domain {
+    fn from(value: SocketAddr) -> Self {
+        Self::Remote(value.to_string())
     }
 }
 
-impl From<&RemotePeerAddr> for SocketAddrV4 {
-    fn from(val: &RemotePeerAddr) -> Self {
-        SocketAddrV4::new(val.addr, val.port.unwrap_or(NETWORK_PORT))
+impl From<IpAddr> for Domain {
+    fn from(value: IpAddr) -> Self {
+        Self::Remote(value.to_string())
     }
 }
 
 #[derive(Encode, Decode, AsRef, Clone, Debug, Display, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CommonShareName(String);
+pub struct ShareName(String);
 
-impl FromStr for CommonShareName {
-    type Err = CommonShareNameParseError;
+impl FromStr for ShareName {
+    type Err = ValueTooLong;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() > MAX_SHARE_NAME_LENGTH {
-            return Err(Self::Err::NameTooLong);
+            return Err(ValueTooLong(MAX_SHARE_NAME_LENGTH));
         }
 
         Ok(Self(s.to_string()))
     }
 }
 
-#[derive(Encode, Decode, Clone, Debug, Display, Error, IsVariant, PartialEq, Eq)]
-pub enum CommonShareNameParseError {
-    #[display("Name of a share cannot exceed {MAX_SHARE_NAME_LENGTH} characters")]
-    NameTooLong,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn common_share_name_parse() {
-        assert!(CommonShareName::from_str("Example").is_ok());
-        assert!(CommonShareName::from_str(&"A".repeat(MAX_SHARE_NAME_LENGTH)).is_ok());
-        assert!(
-            CommonShareName::from_str(&"A".repeat(MAX_SHARE_NAME_LENGTH + 1))
-                .unwrap_err()
-                .is_name_too_long()
-        );
-    }
-
-    #[test]
-    fn full_share_name_parse() {
-        let name = FullShareName::from_str("1.2.3.4/Example").unwrap();
-        assert_eq!(name.addr.addr, Ipv4Addr::from_octets([1, 2, 3, 4]));
-        assert_eq!(name.addr.port, None);
-
-        let name = FullShareName::from_str("1.2.3.4:1234/Example").unwrap();
-        assert_eq!(name.addr.addr, Ipv4Addr::from_octets([1, 2, 3, 4]));
-        assert_eq!(name.addr.port, Some(1234));
-
-        let name = FullShareName::from_str(&format!("1.2.3.4:{NETWORK_PORT}/Example")).unwrap();
-        assert_eq!(name.addr.addr, Ipv4Addr::from_octets([1, 2, 3, 4]));
-        assert_eq!(name.addr.port, None);
-
-        assert!(
-            FullShareName::from_str("Example")
-                .unwrap_err()
-                .is_no_separator()
-        );
-        assert!(FullShareName::from_str("").unwrap_err().is_no_separator());
-        assert!(
-            FullShareName::from_str("Invalid IP/Example")
-                .unwrap_err()
-                .is_invalid_address()
-        );
-        assert!(
-            FullShareName::from_str(&format!(
-                "1.1.1.1/{}",
-                "A".repeat(MAX_SHARE_NAME_LENGTH + 1)
-            ))
-            .unwrap_err()
-            .is_invalid_common_share_name()
-        );
-    }
-
-    #[test]
-    fn share_name_parse() {
-        assert!(ShareName::from_str("Example").unwrap().is_common());
-        assert!(ShareName::from_str("1.1.1.1/Example").unwrap().is_full());
-    }
-}
+#[derive(Encode, Decode, Clone, Debug, Display, Error, PartialEq, Eq)]
+#[display("Name of a share cannot exceed {_0} characters")]
+pub struct ValueTooLong(#[error(ignore)] usize);

@@ -4,12 +4,12 @@ use tokio::{
     net::{UnixListener, UnixStream},
     spawn,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::{
     common::{
         ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream,
-        shares::FullShareName,
+        shares::ShareLocator,
     },
     server::{
         SERVER_CANCEL, ServerError,
@@ -105,23 +105,23 @@ async fn handle_client(stream: UnixStream, state: &SharedState) {
 
 async fn mount_share(
     path: PathBuf,
-    name: FullShareName,
+    locator: ShareLocator,
     state: SharedState,
 ) -> Result<ServerResponse, ServerError> {
-    let addr = name.addr.into();
+    let authority = locator.authority;
     let lock = state.read().await;
-    match lock.get_peers_by_socket().get_by_right(&addr) {
+    match lock.get_peers_by_socket().get_by_right(&authority) {
         Some(peer_id) => {
             drop(lock);
             todo!()
         }
         None => {
             let intent = PeerInitReq::JoinShare {
-                name: name.name,
+                name: locator.share_name,
                 path,
             };
             drop(lock); // Needed to not clone state
-            let resp = super::peer::call::call_peer(addr, intent, state).await?;
+            let resp = super::peer::call::call_peer(authority, intent, state).await?;
         }
     };
 

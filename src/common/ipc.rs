@@ -27,7 +27,7 @@ impl IpcStream<Client> {
 
     pub async fn send_command(&mut self, command: &ClientMessage) -> io::Result<ServerResponse> {
         let encoded = encode(command);
-        self.inner.send(encoded.into()).await?;
+        self.inner.send(encoded.as_slice()).await?;
         let received = self
             .inner
             .next()
@@ -56,7 +56,7 @@ impl IpcStream<Server> {
 
     pub async fn write_respone(&mut self, response: &ServerResponse) -> io::Result<()> {
         let encoded = encode(response);
-        self.inner.send(encoded.into()).await
+        self.inner.send(encoded.as_slice()).await
     }
 }
 

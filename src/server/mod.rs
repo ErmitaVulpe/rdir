@@ -1,8 +1,7 @@
 use std::{
-    net::SocketAddrV4,
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, LazyLock},
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -19,9 +18,9 @@ use tracing::{error, info};
 
 use crate::{
     args::Args,
-    common::shares::CommonShareNameParseError,
+    common::shares::ValueTooLong,
     server::{
-        peer::{NOISE_PARAMS, accept_peers, call::CallPeerError},
+        peer::call::CallPeerError,
         state::{
             State,
             error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
@@ -38,7 +37,7 @@ pub use peer::PeerId;
 pub use peer::ProtocolError as PeerProtocolError;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
-pub static LOGS_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+pub static STATE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     let mut log_dir = dirs::state_dir().unwrap();
     log_dir.push("rdir");
     log_dir
@@ -62,7 +61,6 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
             error!("{:#}", err.context("Error while initializing the server"));
         }
     });
-    runtime.shutdown_timeout(Duration::from_hours(69420));
 
     setup::clean_up(&args);
     Ok(())
@@ -70,9 +68,9 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
 
 async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> anyhow::Result<()> {
     // TEMP new_identity
-    let keypair = snowstorm::Builder::new(NOISE_PARAMS.clone()).generate_keypair()?;
-    let local_peer_id = PeerId::from(&keypair);
-    info!("Local peer id: {local_peer_id}");
+    // let keypair = [0u8;32];
+    // let local_peer_id = PeerId::from(&keypair);
+    // info!("Local peer id: {local_peer_id}");
 
     std_listener.set_nonblocking(true)?;
     let unix_listener =
@@ -80,16 +78,18 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
 
     let socket_addr = args
         .tcp_socket
-        .unwrap_or(SocketAddrV4::new([0; 4].into(), NETWORK_PORT));
+        .unwrap_or(SocketAddr::new([0; 4].into(), NETWORK_PORT));
+    let server_config = quinn::ServerConfig::with_crypto(todo!());
+    let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
+
     let tcp_listener = TcpListener::bind(socket_addr)
         .await
         .context("Failed to bind the TCP socket")?;
 
-    let state = Arc::new(RwLock::new(State::new(keypair)));
+    let state = Arc::new(RwLock::new(State::new(endpoint)));
 
-    let ipc_fut = ipc::accpet_client(unix_listener, state.clone());
-    spawn(SERVER_CANCEL.run_until_cancelled(ipc_fut));
-    spawn(SERVER_CANCEL.run_until_cancelled(accept_peers(tcp_listener, state.clone())));
+    spawn(SERVER_CANCEL.run_until_cancelled(ipc::accpet_client(unix_listener, state.clone())));
+    spawn(SERVER_CANCEL.run_until_cancelled(peer::accept_peers(state)));
 
     await_shutdown().await;
     Ok(())
@@ -122,7 +122,7 @@ pub enum ServerError {
     #[display("Failed to call a peer")]
     CallPeer(CallPeerError),
     #[display("Specified share name is invalid")]
-    CommonShareNameParse(CommonShareNameParseError),
+    CommonShareNameParse(ValueTooLong),
     ExitPeerShare(ExitPeerShareError),
     #[display("Path needs to point to a directory")]
     PathNotDir,

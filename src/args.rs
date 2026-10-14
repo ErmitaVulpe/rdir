@@ -1,10 +1,10 @@
-use std::{fs::canonicalize, net::SocketAddrV4, path::PathBuf};
+use std::{fs::canonicalize, net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueHint};
 use derive_more::IsVariant;
 use tokio::io;
 
-use crate::common::shares::{CommonShareName, FullShareName, ShareName};
+use crate::common::shares::{ShareLocator, ShareName};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -25,10 +25,10 @@ pub struct Args {
     pub tmp_dir: PathBuf,
     /// Server TCP bind socket
     #[arg(env = "RDIR_TCP_SOCKET", global = true, long = "tcp-socket")]
-    pub tcp_socket: Option<SocketAddrV4>,
+    pub tcp_socket: Option<SocketAddr>,
     /// Server UDP bind socket
     #[arg(env = "RDIR_UDP_SOCKET", global = true, long = "udp-socket")]
-    pub udp_socket: Option<SocketAddrV4>,
+    pub udp_socket: Option<SocketAddr>,
 }
 
 impl Args {
@@ -86,7 +86,7 @@ pub enum ConnectCommand {
         /// Specified as: ipv4/example
         /// or with port: ipv4:port/example
         #[arg()]
-        name: FullShareName,
+        name: ShareLocator,
         /// Path to a dir to mount the share
         #[arg(value_hint=ValueHint::DirPath, value_parser=existing_path_parser)]
         path: PathBuf,
@@ -110,7 +110,7 @@ pub enum ShareCommand {
     Remove {
         /// Name of the share
         #[arg()]
-        name: CommonShareName,
+        name: ShareName,
     },
     /// create a new Share
     #[command(short_flag = 's', alias = "s")]
@@ -120,7 +120,7 @@ pub enum ShareCommand {
         path: PathBuf,
         /// Name of the share, defaults to the name of the shared dir
         #[arg()]
-        name: Option<CommonShareName>,
+        name: Option<ShareName>,
     },
 }
 

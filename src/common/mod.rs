@@ -1,13 +1,11 @@
-use std::{collections::BTreeMap, fmt, net::SocketAddrV4};
+use std::{collections::BTreeMap, fmt, net::SocketAddr};
 
 use bitcode::{Decode, Encode};
 use derive_more::{Display, Error, From, IsVariant};
 
 use crate::{
     args::{Args, ConnectCommand, ShareCommand},
-    common::shares::{
-        CommonShareName, CommonShareNameParseError, FullShareName, RemotePeerAddr, ShareName,
-    },
+    common::shares::{ShareLocator, ShareName, ValueTooLong},
     server::{
         PeerId, ServerError,
         state::{
@@ -45,7 +43,7 @@ impl From<&Args> for ClientMessage {
 #[derive(Encode, Decode, Clone, Debug, IsVariant)]
 pub enum ConnectMessage {
     Ls,
-    Mount { path: String, name: FullShareName },
+    Mount { path: String, name: ShareLocator },
     Unmount { name: ShareName },
 }
 
@@ -66,11 +64,11 @@ impl From<&ConnectCommand> for ConnectMessage {
 pub enum ShareMessage {
     Ls,
     Remove {
-        name: CommonShareName,
+        name: ShareName,
     },
     Share {
         path: String,
-        name: Option<CommonShareName>,
+        name: Option<ShareName>,
     },
 }
 
@@ -140,7 +138,7 @@ impl From<ServerError> for ServerResponse {
 }
 
 #[derive(Encode, Decode, Clone, Debug)]
-pub struct RemoteSharesDto(pub BTreeMap<RemotePeerAddr, Vec<RemoteShareDto>>);
+pub struct RemoteSharesDto(pub BTreeMap<PeerId, Vec<RemoteShareDto>>);
 
 impl fmt::Display for RemoteSharesDto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -157,7 +155,7 @@ impl fmt::Display for RemoteSharesDto {
 
 #[derive(Encode, Decode, Clone, Debug)]
 pub struct RemoteShareDto {
-    pub name: CommonShareName,
+    pub name: ShareName,
     pub mount_path: String,
 }
 
@@ -178,7 +176,7 @@ impl fmt::Display for RemoteShareDto {
 
 #[derive(Encode, Decode, Clone, Debug)]
 pub struct ShareDto {
-    pub name: CommonShareName,
+    pub name: ShareName,
     pub path: String,
     pub participants: Vec<PeerId>,
 }
@@ -214,7 +212,7 @@ impl fmt::Display for ShareDto {
 }
 
 #[derive(Encode, Decode, Clone, Debug)]
-pub struct PeersDto(pub BTreeMap<PeerId, SocketAddrV4>);
+pub struct PeersDto(pub BTreeMap<PeerId, SocketAddr>);
 
 impl fmt::Display for PeersDto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -246,7 +244,7 @@ pub enum ServerErrorDto {
     #[display("Failed to call a peer: {_0}")]
     CallPeer(#[error(ignore)] String),
     #[display("Specified share name is invalid")]
-    CommonShareNameParse(CommonShareNameParseError),
+    CommonShareNameParse(ValueTooLong),
     ExitPeerShare(ExitPeerShareError),
     #[display("Path needs to point to a directory")]
     PathNotDir,
