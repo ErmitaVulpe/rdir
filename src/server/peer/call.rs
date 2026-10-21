@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use derive_more::{Display, Error, From, IsVariant};
 use tokio::io;
 
@@ -124,7 +122,7 @@ pub async fn handle_stream(
 #[derive(Clone, Debug, IsVariant)]
 pub enum PeerInitReq {
     /// Resp can be `PeerInitResp::{Err, Ok}`
-    JoinShare { name: ShareName, path: PathBuf },
+    JoinShare { name: ShareName, path: String },
     /// Resp can be `PeerInitResp::ListShares`
     ListShares,
 }

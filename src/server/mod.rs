@@ -1,13 +1,13 @@
 use std::{
     net::SocketAddr,
-    path::PathBuf,
     sync::{Arc, LazyLock},
 };
 
 use anyhow::Context;
 use derive_more::{Display, Error, From, IsVariant};
+use quinn::crypto::rustls::QuicServerConfig;
 use tokio::{
-    net::{TcpListener, UnixListener},
+    net::UnixListener,
     select,
     signal::unix::{SignalKind, signal},
     spawn,
@@ -57,17 +57,14 @@ pub fn run(args: Args, std_listener: std::os::unix::net::UnixListener) -> anyhow
             error!("{:#}", err.context("Error while initializing the server"));
         }
     });
+    drop(runtime);
 
     setup::clean_up(&args);
     Ok(())
 }
 
 async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> anyhow::Result<()> {
-    // TEMP new_identity
-    // let keypair = [0u8;32];
-    // let local_peer_id = PeerId::from(&keypair);
     let identity = identity::Identity::load_or_new(args.get_state_dir()?)?;
-    info!("Local peer id: {}", identity.peer_id());
 
     std_listener.set_nonblocking(true)?;
     let unix_listener =
@@ -76,14 +73,16 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     let socket_addr = args
         .tcp_socket
         .unwrap_or(SocketAddr::new([0; 4].into(), NETWORK_PORT));
-    let server_config = quinn::ServerConfig::with_crypto(todo!());
+
+    let (server_config, peer_id) = identity.into_server_config()?;
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(
+        Arc::new(server_config),
+    )?));
     let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
 
-    let tcp_listener = TcpListener::bind(socket_addr)
-        .await
-        .context("Failed to bind the TCP socket")?;
-
     let state = Arc::new(RwLock::new(State::new(endpoint)));
+
+    info!("Starting server with local peer id: {peer_id}");
 
     spawn(SERVER_CANCEL.run_until_cancelled(ipc::accpet_client(unix_listener, state.clone())));
     spawn(SERVER_CANCEL.run_until_cancelled(peer::accept_peers(state)));

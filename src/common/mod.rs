@@ -89,13 +89,13 @@ impl From<&ShareCommand> for ShareMessage {
 pub enum ServerResponse {
     Err(ServerErrorDto),
     LsMountedShares(RemoteSharesDto),
-    LsShares(SharesDto),
+    LsShares(BTreeMap<ShareName, Share>),
     Ok,
     Pong,
     Status {
         peers: PeersDto,
         remote_shares: RemoteSharesDto,
-        shares: SharesDto,
+        shares: BTreeMap<ShareName, Share>,
     },
 }
 
@@ -106,7 +106,18 @@ impl fmt::Display for ServerResponse {
                 writeln!(f, "error: {:?}", anyhow::Error::from(err.clone()))
             }
             ServerResponse::LsMountedShares(remote_shares_dto) => write!(f, "{remote_shares_dto}"),
-            ServerResponse::LsShares(shares_dto) => write!(f, "{shares_dto}"),
+            ServerResponse::LsShares(shares) => {
+                writeln!(f, "Shares:")?;
+                for (name, share) in shares {
+                    writeln!(
+                        f,
+                        "{name} - {}, participants: {}",
+                        share.path,
+                        share.participants.len()
+                    )?;
+                }
+                Ok(())
+            }
             ServerResponse::Ok => Ok(()),
             ServerResponse::Pong => Ok(()),
             ServerResponse::Status {
@@ -116,7 +127,16 @@ impl fmt::Display for ServerResponse {
             } => {
                 writeln!(f, "{peers}")?;
                 writeln!(f, "{remote_shares}")?;
-                writeln!(f, "{shares}")
+                writeln!(f, "Shares:")?;
+                for (name, share) in shares {
+                    writeln!(
+                        f,
+                        "{name} - {}, participants: {}",
+                        share.path,
+                        share.participants.len()
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -175,43 +195,6 @@ impl fmt::Display for RemoteShareDto {
 }
 
 #[derive(Encode, Decode, Clone, Debug)]
-pub struct ShareDto {
-    pub name: ShareName,
-    pub path: String,
-    pub participants: Vec<PeerId>,
-}
-
-impl From<&Share> for ShareDto {
-    fn from(value: &Share) -> Self {
-        Self {
-            name: value.name.clone(),
-            path: value.path.to_string_lossy().to_string(),
-            participants: value.participants.iter().cloned().collect(),
-        }
-    }
-}
-
-impl fmt::Display for ShareDto {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "  {}:", self.name)?;
-        writeln!(f, "    path: {}", self.path)?;
-        write!(
-            f,
-            "    participants: {}",
-            self.participants
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )?;
-        for peer in &self.participants {
-            write!(f, "{peer} ")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Encode, Decode, Clone, Debug)]
 pub struct PeersDto(pub BTreeMap<PeerId, SocketAddr>);
 
 impl fmt::Display for PeersDto {
@@ -221,19 +204,6 @@ impl fmt::Display for PeersDto {
             // This will panic if OUR server sends bad data
             // But this shouldnt happen
             writeln!(f, "  {k}: {v}")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Encode, Decode, Clone, Debug)]
-pub struct SharesDto(pub Vec<ShareDto>);
-
-impl fmt::Display for SharesDto {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Shares:")?;
-        for share in &self.0 {
-            writeln!(f, "{share}")?;
         }
         Ok(())
     }

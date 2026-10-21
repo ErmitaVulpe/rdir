@@ -1,12 +1,14 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use tokio::{
     net::{UnixListener, UnixStream},
     spawn,
 };
+use tokio_util::time::FutureExt;
 use tracing::{debug, error};
 
 use crate::{
+    client::IPC_TIMEOUT,
     common::{
         ClientMessage, ConnectMessage, ServerResponse, ShareMessage, ipc::IpcStream,
         shares::ShareLocator,
@@ -35,8 +37,12 @@ pub async fn accpet_client(listener: UnixListener, state: SharedState) {
 
 async fn handle_client(stream: UnixStream, state: &SharedState) {
     let mut stream = IpcStream::new_server(stream);
-    let message = match stream.read_command().await {
-        Ok(val) => val,
+    let message = match stream.read_command().timeout(IPC_TIMEOUT).await {
+        Ok(Ok(val)) => val,
+        Ok(Err(_)) => {
+            error!("Local client connection timed out");
+            return;
+        }
         Err(err) => {
             error!("Failed to receive a command from local client {err}");
             return;
@@ -52,7 +58,8 @@ async fn handle_client(stream: UnixStream, state: &SharedState) {
                     Ok(ServerResponse::LsMountedShares(shares))
                 }
                 ConnectMessage::Mount { path, name } => {
-                    mount_share(validate_path(path)?, name, state.clone()).await
+                    validate_path(&path)?;
+                    mount_share(path, name, state.clone()).await
                 }
                 ConnectMessage::Unmount { name } => {
                     Ok(state.write().await.exit_remote_share(name).into())
@@ -68,27 +75,34 @@ async fn handle_client(stream: UnixStream, state: &SharedState) {
                 Ok(ServerResponse::Status {
                     peers: lock.peers_dto(),
                     remote_shares: lock.remote_shares_dto(),
-                    shares: lock.shares_dto(),
+                    shares: lock.shares().to_owned(),
                 })
             }
             ClientMessage::Ping => Ok(ServerResponse::Ok),
             ClientMessage::Share(message) => match message {
                 ShareMessage::Ls => {
-                    let shares = state.read().await.shares_dto();
+                    let shares = state.read().await.shares().to_owned();
                     Ok(ServerResponse::LsShares(shares))
                 }
                 ShareMessage::Remove { name } => Ok(state.write().await.remove_share(&name).into()),
                 ShareMessage::Share { path, name } => {
-                    let path = validate_path(path)?;
-                    let name = name.unwrap_or(
+                    validate_path(&path)?;
+                    let name = if let Some(name) = name {
+                        name
+                    } else {
+                        let path: &Path = path.as_ref();
                         path.file_name()
                             .ok_or(ServerError::PathNotDir)?
                             .to_string_lossy()
                             .to_string()
-                            .parse()?,
-                    );
+                            .parse()?
+                    };
                     let share = Share::new(name, path);
-                    state.write().await.create_share(share)?;
+                    debug!("WAITING FOR LOCK");
+                    let mut lock = state.write().await;
+                    debug!("GOT LOCK");
+                    lock.create_share(share)?;
+                    debug!("REACHED THIS");
                     Ok(ServerResponse::Ok)
                 }
             },
@@ -104,7 +118,7 @@ async fn handle_client(stream: UnixStream, state: &SharedState) {
 }
 
 async fn mount_share(
-    path: PathBuf,
+    path: String,
     locator: ShareLocator,
     state: SharedState,
 ) -> Result<ServerResponse, ServerError> {
@@ -128,13 +142,13 @@ async fn mount_share(
     Ok(ServerResponse::Ok)
 }
 
-fn validate_path(path: String) -> Result<PathBuf, ServerError> {
-    let path = PathBuf::from(path);
-    if path.is_relative() {
+fn validate_path(path: impl AsRef<Path>) -> Result<(), ServerError> {
+    let path_ref = path.as_ref();
+    if path_ref.is_relative() {
         return Err(ServerError::RelativePath);
     }
-    if !path.is_dir() {
+    if !path_ref.is_dir() {
         return Err(ServerError::PathNotDir);
     }
-    Ok(path)
+    Ok(())
 }

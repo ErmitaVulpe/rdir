@@ -1,7 +1,6 @@
 use core::fmt;
 use std::{net::SocketAddr, str::FromStr, time::Duration};
 
-use base58::{FromBase58, ToBase58};
 use bitcode::{Decode, Encode};
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use derive_more::{Display, Error, From, IsVariant};
@@ -22,7 +21,6 @@ use crate::{
 pub mod call;
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerId([u8; 32]);
@@ -40,7 +38,7 @@ impl FromStr for PeerId {
     type Err = PeerIdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw = s.from_base58().map_err(|_| PeerIdParseError)?;
+        let raw = bs58::decode(s).into_vec().map_err(|_| PeerIdParseError)?;
         Ok(Self(raw.try_into().map_err(|_| PeerIdParseError)?))
     }
 }
@@ -51,13 +49,20 @@ pub struct PeerIdParseError;
 
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base58 = self.0.to_base58();
-        write!(f, "{}", &base58[..f.width().unwrap_or(44)])
+        let base58 = bs58::encode(&self.0).into_string();
+        match f.precision() {
+            Some(precision) => write!(f, "{base58:.precision$}"),
+            None => f.write_str(&base58),
+        }
     }
 }
 
 pub async fn accept_peers(state: SharedState) {
-    while let Some(incoming) = state.read().await.get_endpoint().accept().await {
+    let endpoint = {
+        let state = state.read().await;
+        state.get_endpoint().clone()
+    };
+    while let Some(incoming) = endpoint.accept().await {
         let state = state.clone();
         spawn(async move {
             let peer_addr = incoming.remote_address();

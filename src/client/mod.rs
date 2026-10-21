@@ -3,12 +3,15 @@ use std::time::Duration;
 use anyhow::{Context, Result as AnyResult};
 use backoff::{ExponentialBackoffBuilder, backoff::Backoff};
 use tokio::{io, net::UnixStream, time::sleep};
+use tokio_util::time::FutureExt;
 
 use crate::{
     args::Args,
     common::{ClientMessage, ipc::IpcStream},
     server::SOCKET_NAME,
 };
+
+pub const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Client;
 
@@ -36,7 +39,11 @@ impl Client {
             )?,
         };
         let mut ipc_stream = IpcStream::new_client(stream);
-        let resp = ipc_stream.send_command(&ClientMessage::from(&args)).await?;
+        let resp = ipc_stream
+            .send_command(&ClientMessage::from(&args))
+            .timeout(IPC_TIMEOUT)
+            .await
+            .map_err(|_| anyhow::anyhow!("Timed out, server sent no response"))??;
         print!("{resp}");
         Ok(())
     }

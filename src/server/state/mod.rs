@@ -6,13 +6,16 @@ use std::{
 };
 
 use bimap::BiBTreeMap;
+use bitcode::{Decode, Encode};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{
-        PeersDto, RemoteShareDto, RemoteSharesDto, ShareDto, SharesDto, shares::{Authority, ShareLocator, ShareName},
-    }, server::{
+        PeersDto, RemoteSharesDto,
+        shares::{Authority, ShareLocator, ShareName},
+    },
+    server::{
         SERVER_CANCEL,
         peer::{PeerId, PeerInitResp, call::PeerInitReq},
     },
@@ -82,8 +85,8 @@ impl State {
         // RemoteSharesDto(data)
     }
 
-    pub fn shares_dto(&self) -> SharesDto {
-        SharesDto(self.local_shares.values().map(ShareDto::from).collect())
+    pub fn shares(&self) -> &BTreeMap<ShareName, Share> {
+        &self.local_shares
     }
 
     /// Must not be called after peer was dropped
@@ -270,15 +273,15 @@ impl Peer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Encode, Decode, Clone, Debug)]
 pub struct Share {
     pub name: ShareName,
-    pub path: PathBuf,
+    pub path: String,
     pub participants: BTreeSet<PeerId>,
 }
 
 impl Share {
-    pub fn new(name: ShareName, path: PathBuf) -> Self {
+    pub fn new(name: ShareName, path: String) -> Self {
         Self {
             name,
             path,
