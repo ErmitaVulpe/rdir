@@ -50,7 +50,7 @@ async fn try_connect(args: &Args) -> io::Result<UnixStream> {
         .with_max_interval(Duration::from_millis(250))
         .with_max_elapsed_time(Some(Duration::from_millis(1500)))
         .build();
-    let sock = args.tmp_dir.join(SOCKET_NAME);
+    let sock = args.get_run_dir()?.join(SOCKET_NAME);
 
     loop {
         match UnixStream::connect(&sock).await {

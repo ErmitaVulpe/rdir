@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+mod identity;
 mod ipc;
 mod peer;
 mod setup;
@@ -37,11 +38,6 @@ pub use peer::PeerId;
 pub use peer::ProtocolError as PeerProtocolError;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
-pub static STATE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    let mut log_dir = dirs::state_dir().unwrap();
-    log_dir.push("rdir");
-    log_dir
-});
 pub const LOGS_PREFIX: &str = "rdir.log";
 pub const SOCKET_NAME: &str = "rdir.sock";
 /// 29284
@@ -70,7 +66,8 @@ async fn main(args: &Args, std_listener: std::os::unix::net::UnixListener) -> an
     // TEMP new_identity
     // let keypair = [0u8;32];
     // let local_peer_id = PeerId::from(&keypair);
-    // info!("Local peer id: {local_peer_id}");
+    let identity = identity::Identity::load_or_new(args.get_state_dir()?)?;
+    info!("Local peer id: {}", identity.peer_id());
 
     std_listener.set_nonblocking(true)?;
     let unix_listener =

@@ -11,24 +11,27 @@ use crate::common::shares::{ShareLocator, ShareName};
 pub struct Args {
     #[command(subcommand)]
     pub command: Command,
-    /// Absolute path to a dir for temp files
+    /// Path to a dir for runtime files
     #[arg(
-        default_value="/tmp",
-        env="RDIR_TMPDIR",
+        env="RDIR_RUNDIR",
         global=true,
         hide_default_value=true,
-        long="tmpdir",
-        short='t',
+        long="rundir",
         value_hint=ValueHint::DirPath,
-        value_parser=tmpdir_parser,
     )]
-    pub tmp_dir: PathBuf,
-    /// Server TCP bind socket
-    #[arg(env = "RDIR_TCP_SOCKET", global = true, long = "tcp-socket")]
-    pub tcp_socket: Option<SocketAddr>,
+    pub run_dir: Option<PathBuf>,
+    /// Path to a dir for temp files
+    #[arg(
+        env="RDIR_STATEDIR",
+        global=true,
+        hide_default_value=true,
+        long="statedir",
+        value_hint=ValueHint::DirPath,
+    )]
+    pub state_dir: Option<PathBuf>,
     /// Server UDP bind socket
-    #[arg(env = "RDIR_UDP_SOCKET", global = true, long = "udp-socket")]
-    pub udp_socket: Option<SocketAddr>,
+    #[arg(env = "RDIR_MAIN_SOCKET", global = true, long = "main-socket")]
+    pub tcp_socket: Option<SocketAddr>,
 }
 
 impl Args {
@@ -45,6 +48,39 @@ impl Args {
             },
             Command::Kill | Command::Ls => false,
         }
+    }
+
+    fn add_dir_suffix(mut dir: PathBuf) -> PathBuf {
+        dir.push("rdir");
+        dir
+    }
+
+    pub fn get_run_dir(&self) -> io::Result<PathBuf> {
+        match &self.run_dir {
+            Some(path) => Some(path.to_owned()),
+            None => dirs::runtime_dir().map(Self::add_dir_suffix),
+        }
+        .ok_or(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Parameter `rundir` unspecified and $XDG_RUNTIME_DIR env var unset",
+        ))
+    }
+
+    pub fn get_state_dir(&self) -> io::Result<PathBuf> {
+        match &self.state_dir {
+            Some(path) => Some(path.to_owned()),
+            None => dirs::state_dir().map(Self::add_dir_suffix),
+        }
+        .ok_or(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Parameter `statedir` unspecified and $XDG_STATE_HOME and $HOME env vars unset",
+        ))
+    }
+
+    pub fn get_logs_dir(&self) -> io::Result<PathBuf> {
+        let mut dir = self.get_state_dir()?;
+        dir.push("logs");
+        Ok(dir)
     }
 }
 
@@ -122,15 +158,6 @@ pub enum ShareCommand {
         #[arg()]
         name: Option<ShareName>,
     },
-}
-
-fn tmpdir_parser(s: &str) -> Result<PathBuf, &'static str> {
-    let mut path = PathBuf::from(s);
-    if path.is_relative() {
-        return Err("Value of tmpdir has to be an absolute path");
-    }
-    path.push(format!("rdir-{}", nix::unistd::Uid::current()));
-    Ok(path)
 }
 
 fn existing_path_parser(s: &str) -> io::Result<PathBuf> {

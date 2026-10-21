@@ -4,18 +4,19 @@ use nix::{
     libc,
     unistd::{ForkResult, fork, setsid},
 };
+use tokio::io;
 use tracing::{error, level_filters::LevelFilter};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::{
     args::Args,
-    server::{DOWNLOAD_CACHE_DIR, STATE_DIR, LOGS_PREFIX},
+    server::{DOWNLOAD_CACHE_DIR, LOGS_PREFIX},
 };
 
 /// Must be called just once
 pub unsafe fn setup(args: &Args) -> anyhow::Result<WorkerGuard> {
     unsafe { daemonize(args)? };
-    let guard = init_logs();
+    let guard = init_logs(args)?;
     let _ = std::fs::create_dir(DOWNLOAD_CACHE_DIR);
     Ok(guard)
 }
@@ -31,7 +32,7 @@ unsafe fn daemonize(args: &Args) -> anyhow::Result<()> {
     setsid()?;
 
     // Change working directory
-    std::env::set_current_dir(&args.tmp_dir)?;
+    std::env::set_current_dir(&args.get_run_dir()?)?;
 
     // Close standard fds
     for fd in 0..3 {
@@ -48,8 +49,8 @@ unsafe fn daemonize(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_logs() -> WorkerGuard {
-    let file_appender = tracing_appender::rolling::daily(&*STATE_DIR, LOGS_PREFIX);
+fn init_logs(args: &Args) -> io::Result<WorkerGuard> {
+    let file_appender = tracing_appender::rolling::daily(&args.get_logs_dir()?, LOGS_PREFIX);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::DEBUG)
@@ -62,10 +63,10 @@ fn init_logs() -> WorkerGuard {
         );
     }));
 
-    guard
+    Ok(guard)
 }
 
 pub fn clean_up(args: &Args) {
     // Tried removing "." but that left an empty dir
-    let _ = std::fs::remove_dir_all(&args.tmp_dir);
+    let _ = args.get_run_dir().as_ref().map(std::fs::remove_dir_all);
 }

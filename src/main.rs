@@ -20,12 +20,12 @@ fn main() -> AnyResult<()> {
     // Set a restrictive file creation mask
     unsafe { nix::libc::umask(0o077) };
 
-    let sock_path = args.tmp_dir.join(SOCKET_NAME);
+    let sock_path = args.get_run_dir()?.join(SOCKET_NAME);
     let mut is_client = true;
     let maybe_sock = try_connect(&sock_path);
     let mut maybe_listener = None;
     if args.should_server_start() && maybe_sock.is_none() {
-        let _ = fs::create_dir(&args.tmp_dir);
+        let _ = fs::create_dir(&args.get_run_dir()?);
         let listener = UnixListener::bind(&sock_path).context(format!(
             "Failed to create a unix socket at: {}",
             sock_path.to_string_lossy()

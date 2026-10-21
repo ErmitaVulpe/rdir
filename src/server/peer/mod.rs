@@ -1,7 +1,7 @@
 use core::fmt;
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, str::FromStr, time::Duration};
 
-use base58::ToBase58;
+use base58::{FromBase58, ToBase58};
 use bitcode::{Decode, Encode};
 use blake2::{Blake2b, Digest, digest::consts::U32};
 use derive_more::{Display, Error, From, IsVariant};
@@ -27,8 +27,8 @@ pub const MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerId([u8; 32]);
 
-impl From<&[u8]> for PeerId {
-    fn from(value: &[u8]) -> Self {
+impl PeerId {
+    pub fn from_raw_pubkey(value: &[u8]) -> Self {
         let mut hasher = Blake2b::<U32>::new();
         hasher.update(value);
         let res = hasher.finalize();
@@ -36,16 +36,23 @@ impl From<&[u8]> for PeerId {
     }
 }
 
-// impl From<&Keypair> for PeerId {
-//     fn from(value: &Keypair) -> Self {
-//         Self::from(value.public.as_slice())
-//     }
-// }
+impl FromStr for PeerId {
+    type Err = PeerIdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let raw = s.from_base58().map_err(|_| PeerIdParseError)?;
+        Ok(Self(raw.try_into().map_err(|_| PeerIdParseError)?))
+    }
+}
+
+#[derive(Display, Debug, Error)]
+#[display("Invalid peer ID")]
+pub struct PeerIdParseError;
 
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let base58 = self.0.to_base58();
-        write!(f, "{}", &base58[..f.width().unwrap_or(8)])
+        write!(f, "{}", &base58[..f.width().unwrap_or(44)])
     }
 }
 
