@@ -7,7 +7,7 @@ use std::{
 use bitcode::{Decode, Encode};
 use derive_more::{AsRef, Constructor, Display, Error, From, IsVariant};
 
-use crate::server::NETWORK_PORT;
+use crate::server::{NETWORK_PORT, PeerId};
 
 pub const MAX_SHARE_NAME_LENGTH: usize = 256;
 
@@ -134,10 +134,11 @@ impl From<SocketAddr> for Authority {
 }
 
 #[derive(Encode, Decode, Clone, Debug, Display, IsVariant, PartialEq, Eq, PartialOrd, Ord)]
+#[display("{_0}")]
 pub enum Domain {
     #[display("localhost")]
     Local,
-    #[display("{_0}")]
+    PeerId(PeerId),
     Remote(String),
 }
 

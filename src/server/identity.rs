@@ -48,10 +48,6 @@ impl Identity {
         })
     }
 
-    pub fn peer_id(&self) -> &PeerId {
-        &self.peer_id
-    }
-
     pub fn try_load(dir: impl AsRef<Path>) -> Result<Self, IdentityError> {
         let (specified_peer_id, path) = dir
             .as_ref()
@@ -131,7 +127,7 @@ impl Identity {
     }
 }
 
-fn peer_id_from_certder(cert: &CertificateDer<'_>) -> Result<PeerId, IdentityError> {
+pub fn peer_id_from_certder(cert: &CertificateDer<'_>) -> Result<PeerId, IdentityError> {
     let parsed_cert = x509_parser::parse_x509_certificate(cert)?.1;
     Ok(PeerId::from_raw_pubkey(parsed_cert.public_key().raw))
 }

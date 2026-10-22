@@ -1,17 +1,14 @@
 use std::{collections::BTreeMap, fmt, net::SocketAddr};
 
 use bitcode::{Decode, Encode};
-use derive_more::{Display, Error, From, IsVariant};
+use derive_more::{From, IsVariant};
 
 use crate::{
     args::{Args, ConnectCommand, ShareCommand},
-    common::shares::{ShareLocator, ShareName, ValueTooLong},
+    common::shares::{ShareLocator, ShareName},
     server::{
         PeerId, ServerError,
-        state::{
-            RemoteShare, Share,
-            error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
-        },
+        state::{RemoteShare, Share},
     },
 };
 
@@ -87,7 +84,7 @@ impl From<&ShareCommand> for ShareMessage {
 
 #[derive(Encode, Decode, Clone, Debug, From, IsVariant)]
 pub enum ServerResponse {
-    Err(ServerErrorDto),
+    Err(ServerError),
     LsMountedShares(RemoteSharesDto),
     LsShares(BTreeMap<ShareName, Share>),
     Ok,
@@ -146,14 +143,8 @@ impl<E: Into<ServerError>> From<Result<(), E>> for ServerResponse {
     fn from(value: Result<(), E>) -> Self {
         match value {
             Ok(()) => Self::Ok,
-            Err(err) => Self::Err(ServerErrorDto::from(err.into())),
+            Err(err) => Self::Err(ServerError::from(err.into())),
         }
-    }
-}
-
-impl From<ServerError> for ServerResponse {
-    fn from(value: ServerError) -> Self {
-        Self::Err(value.into())
     }
 }
 
@@ -208,56 +199,3 @@ impl fmt::Display for PeersDto {
         Ok(())
     }
 }
-
-#[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
-pub enum ServerErrorDto {
-    #[display("Failed to call a peer: {_0}")]
-    CallPeer(#[error(ignore)] String),
-    #[display("Specified share name is invalid")]
-    CommonShareNameParse(ValueTooLong),
-    ExitPeerShare(ExitPeerShareError),
-    #[display("Path needs to point to a directory")]
-    PathNotDir,
-    Protocol(crate::server::PeerProtocolError),
-    RepeatedShare(#[error(ignore)] RepeatedShare),
-    #[display("Path needs to be absolute")]
-    RelativePath,
-    ShareDoesntExit(#[error(ignore)] ShareDoesntExistError),
-}
-
-impl From<ServerError> for ServerErrorDto {
-    fn from(value: ServerError) -> Self {
-        match value {
-            ServerError::CallPeer(err) => Self::CallPeer(format!("{err:#}")),
-            ServerError::CommonShareNameParse(err) => Self::CommonShareNameParse(err),
-            ServerError::ExitPeerShare(err) => Self::ExitPeerShare(err),
-            ServerError::PathNotDir => Self::PathNotDir,
-            ServerError::Protocol(err) => Self::Protocol(err),
-            ServerError::RelativePath => Self::RelativePath,
-            ServerError::RepeatedShare(err) => Self::RepeatedShare(err),
-            ServerError::ShareDoesntExit(err) => Self::ShareDoesntExit(err),
-        }
-    }
-}
-
-// #[derive(Encode, Decode, Clone, Debug, Display, Error, IsVariant)]
-// pub enum ConnectToRemoteShareErrorDto {
-//     #[display("{_0}")]
-//     Io(#[error(ignore)] String),
-//     ShareDoesntExist(ShareDoesntExistError),
-//     RepeatedRemoteShare(RepeatedRemoteShareError),
-//     RepeatedPeer(RepeatedPeerError),
-//     ProtocolError(ProtocolError),
-// }
-//
-// impl From<ConnectToRemoteShareError> for ConnectToRemoteShareErrorDto {
-//     fn from(value: ConnectToRemoteShareError) -> Self {
-//         match value {
-//             ConnectToRemoteShareError::Io(err) => Self::Io(anyhow::Error::from(err).to_string()),
-//             ConnectToRemoteShareError::ShareDoesntExist(err) => Self::ShareDoesntExist(err),
-//             ConnectToRemoteShareError::RepeatedRemoteShare(err) => Self::RepeatedRemoteShare(err),
-//             ConnectToRemoteShareError::RepeatedPeer(err) => Self::RepeatedPeer(err),
-//             ConnectToRemoteShareError::ProtocolError(err) => Self::ProtocolError(err),
-//         }
-//     }
-// }

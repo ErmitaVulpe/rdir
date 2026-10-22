@@ -15,7 +15,6 @@ use crate::{
     },
     server::{
         SERVER_CANCEL, ServerError,
-        peer::call::PeerInitReq,
         state::{Share, SharedState},
     },
 };
@@ -122,24 +121,25 @@ async fn mount_share(
     locator: ShareLocator,
     state: SharedState,
 ) -> Result<ServerResponse, ServerError> {
-    let authority = locator.authority;
-    let lock = state.read().await;
-    match lock.get_peers_by_socket().get_by_right(&authority) {
-        Some(peer_id) => {
-            drop(lock);
-            todo!()
-        }
-        None => {
-            let intent = PeerInitReq::JoinShare {
-                name: locator.share_name,
-                path,
-            };
-            drop(lock); // Needed to not clone state
-            let resp = super::peer::call::call_peer(authority, intent, state).await?;
-        }
-    };
-
-    Ok(ServerResponse::Ok)
+    todo!()
+    // let authority = locator.authority;
+    // let lock = state.read().await;
+    // match lock.get_peers_by_socket().get_by_right(&authority) {
+    //     Some(peer_id) => {
+    //         drop(lock);
+    //         todo!()
+    //     }
+    //     None => {
+    //         let intent = PeerInitReq::JoinShare {
+    //             name: locator.share_name,
+    //             path,
+    //         };
+    //         drop(lock); // Needed to not clone state
+    //         let resp = super::peer::call::call_peer(authority, intent, state).await?;
+    //     }
+    // };
+    //
+    // Ok(ServerResponse::Ok)
 }
 
 fn validate_path(path: impl AsRef<Path>) -> Result<(), ServerError> {

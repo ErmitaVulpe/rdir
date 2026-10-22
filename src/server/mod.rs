@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
+use bitcode::{Decode, Encode};
 use derive_more::{Display, Error, From, IsVariant};
 use quinn::crypto::rustls::QuicServerConfig;
 use tokio::{
@@ -21,10 +22,7 @@ use crate::{
     common::shares::ValueTooLong,
     server::{
         peer::call::CallPeerError,
-        state::{
-            State,
-            error::{ExitPeerShareError, RepeatedShare, ShareDoesntExistError},
-        },
+        state::{State, StateError},
     },
 };
 
@@ -35,7 +33,6 @@ mod setup;
 pub mod state;
 
 pub use peer::PeerId;
-pub use peer::ProtocolError as PeerProtocolError;
 
 pub const DOWNLOAD_CACHE_DIR: &str = "cache";
 pub const LOGS_PREFIX: &str = "rdir.log";
@@ -112,20 +109,16 @@ async fn await_shutdown() {
     info!("Shutting down");
 }
 
-#[derive(Debug, Display, Error, From, IsVariant)]
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
 #[display("Server encountered an error while processing the command")]
 pub enum ServerError {
+    StateError(StateError),
     #[display("Failed to call a peer")]
     CallPeer(CallPeerError),
     #[display("Specified share name is invalid")]
     CommonShareNameParse(ValueTooLong),
-    ExitPeerShare(ExitPeerShareError),
     #[display("Path needs to point to a directory")]
     PathNotDir,
-    Protocol(PeerProtocolError),
-    #[display("Supplied share name is invalid")]
-    RepeatedShare(RepeatedShare),
     #[display("Path needs to be absolute")]
     RelativePath,
-    ShareDoesntExit(ShareDoesntExistError),
 }

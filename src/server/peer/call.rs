@@ -1,23 +1,26 @@
+use bitcode::{Decode, Encode};
 use derive_more::{Display, Error, From, IsVariant};
 use tokio::io;
 
 use crate::{
-    common::shares::{Authority, ShareName},
-    server::{PeerId, peer::PeerInitResp, state::SharedState},
+    common::shares::Authority,
+    server::{PeerId, state::SharedState},
 };
 
-pub async fn call_peer(
-    authority: Authority,
-    intent: PeerInitReq,
-    state: SharedState,
-) -> Result<PeerInitResp, CallPeerError> {
+pub async fn call_peer(authority: Authority, state: SharedState) -> Result<(), CallPeerError> {
     todo!()
 }
 
-#[derive(Debug, Display, Error, From, IsVariant)]
+#[derive(Encode, Decode, Clone, Debug, Display, Error, From, IsVariant)]
 pub enum CallPeerError {
-    Timeout(tokio::time::error::Elapsed),
-    Io(io::Error),
+    #[display("Connection timed out")]
+    Timeout,
+    #[display("IO error: {_0}")]
+    Io(
+        #[error(ignore)]
+        #[from(io::Error)]
+        String,
+    ),
 }
 
 // /// returns whether this stream spawned a long-lived task
@@ -75,9 +78,8 @@ pub enum CallPeerError {
 pub async fn handle_stream(
     /* stream: yamux::Stream, */
     peer_id: PeerId,
-    intent: PeerInitReq,
     state: SharedState,
-) -> io::Result<PeerInitResp> {
+) -> io::Result<()> {
     todo!()
 
     // let mut stream = LengthDelimitedCodec::builder()
@@ -117,21 +119,4 @@ pub async fn handle_stream(
     //     },
     //     PeerInitReq::ListShares => todo!(),
     // }
-}
-
-#[derive(Clone, Debug, IsVariant)]
-pub enum PeerInitReq {
-    /// Resp can be `PeerInitResp::{Err, Ok}`
-    JoinShare { name: ShareName, path: String },
-    /// Resp can be `PeerInitResp::ListShares`
-    ListShares,
-}
-
-impl PeerInitReq {
-    fn into_dto(self) -> super::PeerInitReqDto {
-        match self {
-            PeerInitReq::JoinShare { name, .. } => super::PeerInitReqDto::JoinShare { name },
-            PeerInitReq::ListShares => super::PeerInitReqDto::ListShares,
-        }
-    }
 }
